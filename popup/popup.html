@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>UW Auto-Register</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>UW Auto-Register</h1>
+      <div class="banner" id="modeBanner">
+        Mode: manual. You click Update Schedule.
+      </div>
+    </header>
+
+    <section class="row">
+      <div class="card">
+        <label class="card-title">Method</label>
+        <div class="seg">
+          <button data-method="import" class="seg-btn">Import from MyPlan</button>
+          <button data-method="prefill" class="seg-btn">Direct SLN prefill</button>
+        </div>
+        <p class="hint" id="methodHint"></p>
+      </div>
+
+      <div class="card">
+        <label class="card-title">Alarm (registration time)</label>
+        <div class="alarm-row">
+          <input type="datetime-local" id="alarmTime" step="1" />
+          <button id="rescheduleBtn" class="primary">Set</button>
+        </div>
+        <div class="alarm-row">
+          <button id="openRegister" class="secondary">Open register.uw now</button>
+          <button id="openMyPlan" class="secondary">Open MyPlan</button>
+        </div>
+        <p class="hint" id="alarmStatus">No alarm set.</p>
+      </div>
+    </section>
+
+    <section class="card danger">
+      <label class="card-title">Sleep-through mode (auto-submit) — risky</label>
+      <div class="toggle-row">
+        <label><input type="checkbox" id="autoSubmit" /> Auto-click Update Schedule at alarm time</label>
+        <span id="autoSubmitState" class="hint"></span>
+      </div>
+      <div class="toggle-row">
+        <label><input type="checkbox" id="keepAlive" /> Keep SSO session alive (ping every 20 min)</label>
+        <span id="keepAliveState" class="hint"></span>
+      </div>
+      <p class="hint warn-hint">
+        UW policy forbids automated submission. With auto-submit on, the
+        extension fills SLNs, waits 1.5&ndash;3s, clicks Update Schedule once,
+        and on failure tries the conflict-group backup exactly once. Max 2
+        attempts per alarm. Use a personal device that won't be banned in
+        critical-path contexts.
+      </p>
+      <div class="toggle-row">
+        <button id="fireNow" class="warn">Test fire now</button>
+        <button id="clearSession" class="secondary">Clear submit session</button>
+      </div>
+      <p class="hint warn-hint">
+        "Test fire now" is a REAL registration attempt (same as the 6 AM alarm).
+        If auto-submit is ON and your SLNs are real, it will actually register
+        or drop. Turn auto-submit OFF (or use fake SLNs) for a dry run.
+      </p>
+      <div class="card-head" style="margin-top:6px">
+        <label class="card-title">Last run log</label>
+        <button id="clearLog" class="mini">Clear</button>
+      </div>
+      <pre id="runLog" class="diag">No run yet.</pre>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <label class="card-title">Stable SLNs (non-conflicting classes)</label>
+        <button id="addSln" class="mini">+ Add</button>
+      </div>
+      <table id="slnTable" class="grid">
+        <thead>
+          <tr>
+            <th>Label</th>
+            <th>SLN</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <label class="card-title">Conflict groups</label>
+        <button id="addGroup" class="mini">+ Group</button>
+      </div>
+      <div id="groups"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <label class="card-title">Manual steps (act on the open register.uw tab)</label>
+        <span id="lastApplied" class="hint"></span>
+      </div>
+      <p class="hint">Run these one at a time to test each stage by hand:</p>
+      <div class="apply-row">
+        <button id="stepImport" class="secondary">1a. Import from MyPlan</button>
+        <button id="refill" class="secondary">1b. Fill SLN box</button>
+        <button id="stepAddCart" class="secondary">2. Add to cart</button>
+        <button id="stepUpdate" class="warn">3. Update Schedule</button>
+      </div>
+      <div class="apply-row" style="margin-top:6px">
+        <button id="useDefault" class="primary">Conflict: use default (EE 344)</button>
+        <button id="tryBackup" class="warn">Conflict: try backup (EE 280)</button>
+        <button id="diagnose" class="secondary">Diagnose page</button>
+      </div>
+      <p class="hint warn-hint">
+        "3. Update Schedule" really submits whatever is in the cart. Use fake
+        SLNs for dry runs.
+      </p>
+      <pre id="diagnoseOut" class="diag" style="display:none"></pre>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <label class="card-title">MyPlan availability snapshot</label>
+        <button id="refreshMyplan" class="mini">Refresh</button>
+      </div>
+      <table id="coursesTable" class="grid">
+        <thead>
+          <tr>
+            <th>Course</th>
+            <th>Sec</th>
+            <th>SLN</th>
+            <th>Seats</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p class="hint" id="scrapedAt">Never scraped.</p>
+    </section>
+
+    <footer>
+      <small>
+        Manual mode = autofill only (you click Submit). Sleep-through mode =
+        the extension clicks Update Schedule for you. UW policy forbids automated
+        submission; use sleep-through mode at your own risk on a personal device.
+      </small>
+    </footer>
+
+    <script src="../lib/uw.js"></script>
+    <script src="../lib/storage.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

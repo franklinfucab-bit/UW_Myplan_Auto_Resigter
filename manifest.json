@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "UW MyPlan Auto-Register",
+  "version": "0.1.0",
+  "description": "Autofill SLNs on register.uw with conflict-group pruning (e.g. EE 344 > EE 280). Policy-compliant: you click Update Schedule.",
+  "permissions": ["storage", "alarms", "tabs", "scripting"],
+  "host_permissions": [
+    "https://myplan.uw.edu/*",
+    "https://register.uw.edu/*",
+    "https://sdb.admin.uw.edu/*"
+  ],
+  "background": {
+    "service_worker": "background/background.js"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "UW MyPlan Auto-Register"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://myplan.uw.edu/*"],
+      "js": ["lib/uw.js", "lib/storage.js", "content/myplan.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://register.uw.edu/*",
+        "https://sdb.admin.uw.edu/*"
+      ],
+      "js": ["lib/uw.js", "lib/storage.js", "content/register.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.log
+
+# Node (in case we add tooling later)
+node_modules/
+npm-debug.log*
+
+# Local scratch
+*.tmp
+scratch/
