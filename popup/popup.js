@@ -33,7 +33,33 @@ function render() {
   renderLastApplied();
   renderDanger();
   renderModeBanner();
+  renderLoginNotice();
   renderRunLog();
+}
+
+function renderLoginNotice() {
+  const el = $("#loginNotice");
+  if (!el) return;
+  const ev = state.loginEvent;
+  // Only surface recent events (within the last 2 hours) so it doesn't linger.
+  if (!ev || Date.now() - ev.t > 2 * 60 * 60 * 1000) {
+    el.style.display = "none";
+    return;
+  }
+  const when = new Date(ev.t).toLocaleTimeString();
+  let msg;
+  if (ev.kind === "auto-submitted") {
+    msg = `Session had expired at ${when} — auto-clicked Sign in (Duo may have prompted).`;
+  } else if (ev.kind === "manual") {
+    msg = `You were logged out at ${when} — sign in on the UW NetID page (${ev.detail || "manual"}); the flow resumes after.`;
+  } else {
+    msg = `You were logged out at ${when} — redirected to UW NetID sign-in.`;
+  }
+  el.textContent = msg;
+  el.style.display = "block";
+  el.style.background = "#fdecea";
+  el.style.borderColor = "#e0928a";
+  el.style.color = "#7a2a14";
 }
 
 function renderRunLog() {
@@ -411,7 +437,7 @@ async function onClearSession() {
 }
 
 async function onClearLog() {
-  await UWStore.update({ runLog: [] });
+  await UWStore.update({ runLog: [], loginEvent: null });
   await load();
 }
 

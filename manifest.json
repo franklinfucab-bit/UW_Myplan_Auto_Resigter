@@ -7,7 +7,9 @@
   "host_permissions": [
     "https://myplan.uw.edu/*",
     "https://register.uw.edu/*",
-    "https://sdb.admin.uw.edu/*"
+    "https://sdb.admin.uw.edu/*",
+    "https://idp.u.washington.edu/*",
+    "https://weblogin.washington.edu/*"
   ],
   "background": {
     "service_worker": "background/background.js"
@@ -28,6 +30,14 @@
         "https://sdb.admin.uw.edu/*"
       ],
       "js": ["lib/uw.js", "lib/storage.js", "content/register.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://idp.u.washington.edu/*",
+        "https://weblogin.washington.edu/*"
+      ],
+      "js": ["lib/uw.js", "lib/storage.js", "content/weblogin.js"],
       "run_at": "document_idle"
     }
   ]

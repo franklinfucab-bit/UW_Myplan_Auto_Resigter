@@ -42,6 +42,16 @@
     return !!el && el.offsetParent !== null;
   }
 
+  // Heuristic: are we on (or showing) a UW NetID sign-in state instead of the
+  // real register app? Happens when the SSO session has expired.
+  function looksLoggedOut() {
+    if (UW.isLoginUrl(location.href)) return true;
+    const t = (document.body?.innerText || "").toLowerCase();
+    return /uw\s*netid\s*sign-?in|sign in with your uw netid|weblogin|please sign in|enter your uw netid/.test(
+      t
+    );
+  }
+
   function clickables() {
     return Array.from(
       document.querySelectorAll(
@@ -358,6 +368,13 @@
       250
     );
     await logStep("page ready?", ready);
+    if (!ready && looksLoggedOut()) {
+      await logStep(
+        "aborted",
+        "appears logged out (redirected to weblogin) - signing you in, will retry"
+      );
+      return; // leave session fresh so the post-login reload retries.
+    }
     await sleep(UW.PAGE_SETTLE_MS);
 
     const winners = resolveWinners(data, {});
@@ -398,6 +415,13 @@
       250
     );
     await logStep("page ready (import)?", ready);
+    if (!ready && looksLoggedOut()) {
+      await logStep(
+        "aborted",
+        "appears logged out (redirected to weblogin) - signing you in, will retry"
+      );
+      return; // leave session fresh so the post-login reload retries.
+    }
     await sleep(UW.PAGE_SETTLE_MS);
 
     const importBtn = findImportButton();
