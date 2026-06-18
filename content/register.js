@@ -347,6 +347,84 @@
 
   // ----- Auto-submit state machine -------------------------------------
 
+  // "prefill" method: type the conflict-resolved SLNs into the Enter SLN box,
+  // Add to cart, then (if auto) Update Schedule.
+  async function runPrefillAttempt(data, doSubmit) {
+    // Wait for the React app to finish mounting after the reload. Acting too
+    // early was why test-fire filled nothing and the cart stayed empty.
+    const ready = await waitUntil(
+      () => findSlnInput() && findAddToCartButton() && findUpdateButton(),
+      UW.PAGE_READY_MAX_MS,
+      250
+    );
+    await logStep("page ready?", ready);
+    await sleep(UW.PAGE_SETTLE_MS);
+
+    const winners = resolveWinners(data, {});
+    const filled = await fillSlnBox(winners);
+    await logStep("filled SLN box", filled ? winners.join(", ") : "FAILED");
+    highlightButtons();
+
+    if (!doSubmit) {
+      await logStep("stopped", "auto-submit is OFF (manual mode) - only filled the box");
+      return;
+    }
+    if (!filled) {
+      await logStep("aborted", "could not fill SLN box");
+      await clearSession();
+      return;
+    }
+
+    await sleep(jitter(400, 900));
+    const added = clickAddToCart();
+    await logStep("clicked Add to cart", added);
+    await waitForCart();
+    await logStep("cart filled?", !cartIsEmpty());
+
+    await sleep(jitter(UW.SUBMIT_DELAY_MIN_MS, UW.SUBMIT_DELAY_MAX_MS));
+    await patchSession({ attempts: 1, lastAttemptAt: Date.now() });
+    const clicked = clickUpdateSchedule();
+    await logStep("clicked Update Schedule", clicked);
+    if (!clicked) await clearSession();
+  }
+
+  // "import" method: click the page's own "Import from MyPlan" button so the
+  // cart is populated from the saved plan, then (if auto) Update Schedule. We
+  // do NOT type SLNs here - that's the prefill path.
+  async function runImportAttempt(data, doSubmit) {
+    const ready = await waitUntil(
+      () => findImportButton() && findUpdateButton(),
+      UW.PAGE_READY_MAX_MS,
+      250
+    );
+    await logStep("page ready (import)?", ready);
+    await sleep(UW.PAGE_SETTLE_MS);
+
+    const importBtn = findImportButton();
+    if (!importBtn) {
+      await logStep("aborted", "Import from MyPlan button not found");
+      highlightButtons();
+      if (doSubmit) await clearSession();
+      return;
+    }
+    importBtn.click();
+    await logStep("clicked Import from MyPlan", true);
+    await waitForCart();
+    await logStep("cart filled?", !cartIsEmpty());
+    highlightButtons();
+
+    if (!doSubmit) {
+      await logStep("stopped", "auto-submit is OFF (manual mode) - imported plan only");
+      return;
+    }
+
+    await sleep(jitter(UW.SUBMIT_DELAY_MIN_MS, UW.SUBMIT_DELAY_MAX_MS));
+    await patchSession({ attempts: 1, lastAttemptAt: Date.now() });
+    const clicked = clickUpdateSchedule();
+    await logStep("clicked Update Schedule", clicked);
+    if (!clicked) await clearSession();
+  }
+
   let ran = false;
   async function runAuto() {
     if (ran) return;
@@ -374,37 +452,19 @@
     if (session.attempts === 0) {
       await resetLog();
       await logStep("fire", `autoSubmit=${autoSubmit} session.autoSubmit=${session.autoSubmit} method=${method}`);
-      const winners = resolveWinners(data, {});
-      const filled = await fillSlnBox(winners);
-      await logStep("filled SLN box", filled ? winners.join(", ") : "FAILED");
-      highlightButtons();
 
-      if (!(autoSubmit && session.autoSubmit)) {
-        await logStep("stopped", "auto-submit is OFF (manual mode) - only filled the box");
-        return;
+      if (method === "import") {
+        await runImportAttempt(data, autoSubmit && session.autoSubmit);
+      } else {
+        await runPrefillAttempt(data, autoSubmit && session.autoSubmit);
       }
-      if (!filled) {
-        await logStep("aborted", "could not fill SLN box");
-        await clearSession();
-        return;
-      }
-
-      await sleep(jitter(400, 900));
-      const added = clickAddToCart();
-      await logStep("clicked Add to cart", added);
-      await waitForCart();
-      await logStep("cart filled?", !cartIsEmpty());
-
-      await sleep(jitter(UW.SUBMIT_DELAY_MIN_MS, UW.SUBMIT_DELAY_MAX_MS));
-      await patchSession({ attempts: 1, lastAttemptAt: Date.now() });
-      const clicked = clickUpdateSchedule();
-      await logStep("clicked Update Schedule", clicked);
-      if (!clicked) await clearSession();
       return;
     }
 
     // ---- Attempt 1 result -> maybe backup (EE 280) ----
     if (session.attempts === 1) {
+      // Wait for the result banner to render before judging.
+      await waitUntil(() => detectResult() !== "unknown", UW.RESULT_WAIT_MAX_MS, 250);
       const result = detectResult();
       await logStep("attempt 1 result", result);
 
