@@ -122,6 +122,88 @@
 
     <section class="card">
       <div class="card-head">
+        <label class="card-title">Email trigger (Notify.UW via Gmail) — recommended</label>
+        <button id="gmailTest" class="mini">Test</button>
+      </div>
+      <div class="toggle-row">
+        <button id="gmailSignin" class="primary">Sign in with Google</button>
+        <button id="gmailSignout" class="secondary">Sign out</button>
+      </div>
+      <div class="toggle-row">
+        <label><input type="checkbox" id="gmailEnabled" /> Auto-register when a Notify.UW "seats available" email arrives</label>
+      </div>
+      <p class="hint">
+        Most reliable trigger — no phone or open tab needed. Subscribe to your
+        sections on Notify.UW with the <b>Email</b> box checked, using the Google
+        account you sign in with here. The extension reads that inbox via the
+        Gmail API every couple of seconds and fires registration at the exact SLN
+        (submits only if auto-submit above is on). One-time Google setup required;
+        see the README. Fires appear in <b>Reopen history</b> below.
+      </p>
+      <p class="hint" id="gmailStatus"></p>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <label class="card-title">SMS trigger (Notify.UW via Google Messages) — fallback</label>
+        <button id="openMessages" class="mini">Open Messages</button>
+      </div>
+      <div class="toggle-row">
+        <label><input type="checkbox" id="smsEnabled" /> Auto-register when a Notify.UW "seats available" text (from 22733) arrives</label>
+      </div>
+      <p class="hint">
+        Fastest trigger. Pair your phone at
+        <b>messages.google.com/web</b> and keep that tab open. When a new text
+        like <i>"E E 474 A (SLN: 10973) has seats available…"</i> arrives, the
+        extension reads the SLN and fires registration targeting exactly that
+        section (submits only if auto-submit above is on). Texts already in the
+        thread when the tab loads are ignored, so a reload won't re-register old
+        alerts. Fires from the SMS appear in <b>Reopen history</b> below.
+      </p>
+      <p class="hint" id="smsStatus"></p>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <label class="card-title">Reopened-class watcher (MyPlan fallback — slower)</label>
+        <button id="addWatch" class="mini">+ Add</button>
+      </div>
+      <div class="toggle-row">
+        <label><input type="checkbox" id="watchEnabled" /> Watch MyPlan for sections that reopen (closed/waitlist → open)</label>
+      </div>
+      <div class="alarm-row">
+        <label class="hint">Check every
+          <input type="number" id="watchInterval" min="1" step="1" style="width:60px" /> min
+        </label>
+        <button id="watchNow" class="secondary">Check now</button>
+      </div>
+      <p class="hint">
+        Add the SLNs you want to watch. When a watched section flips from
+        closed/waitlist to open, you get a desktop notification and the
+        registration handler auto-fires (it submits only if auto-submit above is
+        on). Requires an open MyPlan tab — the watcher reloads it each cycle.
+      </p>
+      <table id="watchTable" class="grid">
+        <thead>
+          <tr>
+            <th>Label</th>
+            <th>SLN</th>
+            <th>Last seen</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p class="hint" id="watchStatus">Watcher off.</p>
+      <div class="card-head" style="margin-top:6px">
+        <label class="card-title">Reopen history</label>
+        <button id="clearWatchEvents" class="mini">Clear</button>
+      </div>
+      <pre id="watchEvents" class="diag">No reopen events yet.</pre>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
         <label class="card-title">MyPlan availability snapshot</label>
         <button id="refreshMyplan" class="mini">Refresh</button>
       </div>

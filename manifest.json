@@ -3,20 +3,38 @@
   "name": "UW MyPlan Auto-Register",
   "version": "0.1.0",
   "description": "Autofill SLNs on register.uw with conflict-group pruning (e.g. EE 344 > EE 280). Policy-compliant: you click Update Schedule.",
-  "permissions": ["storage", "alarms", "tabs", "scripting"],
+  "permissions": ["storage", "alarms", "tabs", "scripting", "notifications", "identity"],
   "host_permissions": [
     "https://myplan.uw.edu/*",
     "https://register.uw.edu/*",
     "https://sdb.admin.uw.edu/*",
     "https://idp.u.washington.edu/*",
-    "https://weblogin.washington.edu/*"
+    "https://weblogin.washington.edu/*",
+    "https://messages.google.com/*",
+    "https://gmail.googleapis.com/*",
+    "https://www.googleapis.com/*",
+    "https://oauth2.googleapis.com/*"
   ],
+  "oauth2": {
+    "client_id": "PASTE_YOUR_OAUTH_CLIENT_ID.apps.googleusercontent.com",
+    "scopes": ["https://www.googleapis.com/auth/gmail.readonly"]
+  },
   "background": {
     "service_worker": "background/background.js"
   },
+  "icons": {
+    "16": "popup/icon16.png",
+    "48": "popup/icon48.png",
+    "128": "popup/icon128.png"
+  },
   "action": {
     "default_popup": "popup/popup.html",
-    "default_title": "UW MyPlan Auto-Register"
+    "default_title": "UW MyPlan Auto-Register",
+    "default_icon": {
+      "16": "popup/icon16.png",
+      "48": "popup/icon48.png",
+      "128": "popup/icon128.png"
+    }
   },
   "content_scripts": [
     {
@@ -38,6 +56,11 @@
         "https://weblogin.washington.edu/*"
       ],
       "js": ["lib/uw.js", "lib/storage.js", "content/weblogin.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://messages.google.com/*"],
+      "js": ["lib/uw.js", "lib/storage.js", "lib/notify.js", "content/messages.js"],
       "run_at": "document_idle"
     }
   ]

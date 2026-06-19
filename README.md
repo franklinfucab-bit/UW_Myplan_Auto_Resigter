@@ -87,9 +87,119 @@ for whatever's in the conflict group. Either turn off auto-submit first, or
 clear your SLNs, or set the conflict-group SLNs to obviously-invalid values
 (`00000`).
 
+## Catching a class that reopens
+
+When a full class reopens, Notify.UW blasts every subscriber at once and the
+fastest bots register within milliseconds. So the goal is to react to the
+*earliest* signal you can get. Three mechanisms, fastest/most-reliable first:
+
+### 1. Email trigger (recommended) — Notify.UW via Gmail
+
+Notify.UW emails you the instant a seat opens. Reading that email through the
+**Gmail API** is the most reliable trigger: it runs in the service worker with
+**no open tab and no paired phone**, and email reaches Gmail in a single hop
+(vs. SMS, which crawls carrier → phone → Google sync → web page). Configure it
+in the popup's **Email trigger** card.
+
+**One-time setup (~15 min):**
+
+1. Pick or create a Gmail account (a fresh dedicated one keeps the inbox clean).
+2. In the [Google Cloud Console](https://console.cloud.google.com/): create a
+   project, then **APIs & Services → Library → enable the Gmail API**.
+3. **APIs & Services → OAuth consent screen**: choose *External*, fill the
+   required fields, and add your Gmail under **Test users**.
+4. Load this extension unpacked (`chrome://extensions`) and copy the
+   **extension ID** Chrome shows on its card.
+5. **APIs & Services → Credentials → Create credentials → OAuth client ID →
+   Application type: Chrome Extension**, paste that extension ID, and copy the
+   generated **client ID**.
+6. Paste the client ID into `manifest.json` → `oauth2.client_id` (replace the
+   `PASTE_YOUR_OAUTH_CLIENT_ID…` placeholder), then reload the extension.
+   *(The extension ID changes if you move the folder. To pin it, add a `key` to
+   the manifest — ask if you want that.)*
+7. On Notify.UW, subscribe to your section(s) with the **Email** box checked,
+   using that Gmail address.
+8. In the popup: **Sign in with Google** (approve the read-only consent once) →
+   **Test** (should print the SLN of your latest Notify email) → tick
+   **Auto-register when a Notify.UW email arrives** to arm it.
+
+How it works:
+
+- `lib/gmail.js` gets a read-only OAuth token via `chrome.identity`, then the
+  service worker polls Gmail every ~2s while armed
+  (`q="seats available" newer_than:1h`). `chrome.alarms` has a 1-minute floor,
+  so the fast cadence is an in-worker loop; a 1-min heartbeat alarm restarts it
+  if Chrome evicts the worker. Because emails persist in the inbox, a brief gap
+  only adds latency — it never drops an alert.
+- Each email's text (subject + snippet + body) goes through the same
+  `lib/notify.js` parser as the SMS path, so the SLN extraction is identical and
+  unit-tested. Handled message IDs are remembered to avoid double-firing.
+- On a fresh alert the worker shows a desktop notification and fires
+  registration **targeting exactly that SLN** (submits only if auto-submit is
+  on). Fires appear in **Reopen history**.
+
+Reality check: this is the fastest *legitimate* signal and far steadier than the
+SMS scrape, but a tuned bot hitting the registration API directly can still win.
+There's no way to beat that without the same forbidden API hammering.
+
+### 2. SMS trigger (fallback) — Notify.UW via Google Messages
+
+The official Notify.UW text (from shortcode **22733**) is an alternative signal,
+but it depends on a paired phone, an open Messages tab, and Google's page markup
+not changing. Use it as a redundant backup to the email trigger. Configure it in
+the popup's **SMS trigger** card:
+
+1. On the spare device, open `messages.google.com/web` and pair your phone
+   (keep the tab open, like keep-alive).
+2. Subscribe to the section(s) you want on Notify.UW so the texts actually
+   arrive.
+3. Toggle **Auto-register when a Notify.UW "seats available" text arrives** on.
+
+How it works:
+
+- `content/messages.js` watches the Messages thread. Texts already present when
+  the tab loads are treated as a baseline and never fire (so a reload can't
+  re-register old alerts). Only a *newly arriving* text triggers.
+- When a new text matches the Notify.UW format
+  (`E E 474 A (SLN: 10973) has seats available…`), `lib/notify.js` parses out
+  the SLN. The unsubscribe line (`STOP SLN …`) is ignored because it lacks
+  "seats available".
+- The service worker shows a desktop notification and fires registration
+  **targeting exactly that SLN** (single attempt, no conflict-group backup).
+  It submits only if auto-submit is on; otherwise it just opens/prefills
+  register.uw. Each SLN is rate-limited (10-min cooldown) so it can't loop.
+
+### 3. MyPlan watcher (last resort, slowest) — closed → open detection
+
+Off by default. Polls MyPlan on an interval, so it's seconds-to-minutes behind
+the email/SMS triggers — keep it as a backup only. Configure it in the popup's
+**Reopened-class watcher** card:
+
+1. Add the SLNs you want to watch (the closed/waitlisted sections you're after).
+2. Toggle **Watch MyPlan for sections that reopen** on and set a check interval
+   (default 5 min, 1 min floor).
+3. Keep a MyPlan tab open. Each cycle the watcher quietly reloads it so the
+   page reports current seat counts.
+
+How detection works:
+
+- `content/myplan.js` re-scrapes each section's status on every reload and
+  compares it to the last snapshot. When a *watched* SLN flips from
+  `closed`/`waitlist` to `open`, it reports the transition once (it won't fire
+  again until the section closes and reopens).
+- On a reopen the service worker shows a desktop **notification** and
+  **auto-fires the registration handler**. That handler respects your
+  auto-submit toggle: if auto-submit is off it just opens/reloads register.uw
+  and prefills the SLNs; if it's on it submits. Clicking the notification
+  focuses (or opens) the register.uw tab.
+
+This polls **MyPlan** (the planning site), not the registration server, so it
+doesn't violate the no-retry-storm rule below.
+
 ## What the extension never does
 
-- Poll the registration server for available seats. (No retry storms.)
+- Poll the registration server (register.uw / SDB) for available seats. (No
+  retry storms. The reopened-class watcher polls MyPlan only.)
 - Re-submit indefinitely. Cap is 2 attempts per alarm.
 - Auto-fill your NetID password.
 - Tap Duo for you. You need a trusted browser or a phone tap once.
@@ -105,10 +215,13 @@ Keep-alive is your best mitigation.
 manifest.json
 background/background.js   alarms, keep-alive, tab orchestration
 content/register.js        prefill + prune + auto-submit state machine
-content/myplan.js          best-effort seat scraping
+content/myplan.js          seat scraping + reopened-class detection
+content/messages.js        Notify.UW SMS listener (Google Messages for Web)
+lib/gmail.js               Notify.UW email reader (Gmail API via chrome.identity)
 popup/popup.{html,css,js}  UI
 lib/uw.js                  constants + storage keys + default state
 lib/storage.js             chrome.storage wrapper + SLN resolution
+lib/notify.js              Notify.UW SMS text parser (pure, unit-tested)
 ```
 
 ## Troubleshooting

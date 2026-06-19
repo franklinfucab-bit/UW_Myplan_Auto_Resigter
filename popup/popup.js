@@ -30,6 +30,9 @@ function render() {
   renderSlns();
   renderGroups();
   renderCourses();
+  renderGmail();
+  renderSms();
+  renderWatch();
   renderLastApplied();
   renderDanger();
   renderModeBanner();
@@ -229,6 +232,94 @@ function renderCourses() {
   $("#scrapedAt").textContent = state.lastScrapedAt
     ? `Last scrape: ${new Date(state.lastScrapedAt).toLocaleTimeString()}`
     : "Never scraped.";
+}
+
+function renderGmail() {
+  const cb = $("#gmailEnabled");
+  if (cb) cb.checked = !!state.gmailEnabled;
+  const el = $("#gmailStatus");
+  if (!el) return;
+  const gs = state.gmailStatus;
+  const acct = gs?.email ? ` (${gs.email})` : "";
+  if (!gs) {
+    el.textContent = "Not signed in. Click \"Sign in with Google\" to connect the inbox you subscribe Notify.UW with.";
+  } else if (!gs.ok) {
+    el.textContent = `Problem${acct}: ${gs.reason}. Try Sign in again.`;
+  } else if (state.gmailEnabled) {
+    const ago = Math.round((Date.now() - gs.lastCheckedAt) / 1000);
+    el.textContent = `Armed${acct}. Last poll ${ago}s ago. New Notify.UW emails auto-fire registration.`;
+  } else {
+    el.textContent = `Signed in${acct}. Toggle the checkbox to arm polling.`;
+  }
+}
+
+function renderSms() {
+  const cb = $("#smsEnabled");
+  if (cb) cb.checked = !!state.smsEnabled;
+  const el = $("#smsStatus");
+  if (!el) return;
+  if (!state.smsEnabled) {
+    el.textContent = "Off.";
+    return;
+  }
+  el.textContent =
+    "Armed. Keep a messages.google.com/web tab open and paired. " +
+    "New 22733 alerts will auto-fire registration.";
+}
+
+function renderWatch() {
+  $("#watchEnabled").checked = !!state.watchEnabled;
+  $("#watchInterval").value = state.watchIntervalMin || 5;
+
+  const tbody = $("#watchTable tbody");
+  tbody.innerHTML = "";
+  const list = state.watchList || [];
+  const snap = state.seatSnapshot || {};
+  if (!list.length) {
+    tbody.innerHTML = `<tr><td colspan="4" class="hint">No watched sections. Click + Add.</td></tr>`;
+  } else {
+    for (let i = 0; i < list.length; i++) {
+      const w = list[i];
+      const seen = snap[(w.sln || "").trim()];
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td><input type="text" data-wi="${i}" data-k="label" placeholder="e.g. EE 235 A" value="${escapeAttr(w.label || "")}"></td>
+        <td><input type="text" data-wi="${i}" data-k="sln" placeholder="5-digit" maxlength="5" inputmode="numeric" value="${escapeAttr(w.sln || "")}"></td>
+        <td>${seen ? `<span class="status-pill status-${seen}">${seen}</span>` : `<span class="hint">—</span>`}</td>
+        <td><span class="x" data-wi="${i}" data-act="del-watch">×</span></td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+  $$("#watchTable input").forEach((el) => {
+    el.addEventListener("change", onWatchEdit);
+    el.addEventListener("blur", onWatchEdit);
+  });
+  $$("#watchTable .x").forEach((el) => el.addEventListener("click", onWatchDelete));
+
+  const ws = state.watchStatus;
+  if (state.watchEnabled && ws) {
+    const ago = Math.round((Date.now() - ws.lastCheckedAt) / 60000);
+    $("#watchStatus").textContent =
+      `Last check ${ago}m ago — ${ws.tabs} MyPlan tab(s)${ws.note && ws.note !== "ok" ? " — " + ws.note : ""}`;
+  } else if (state.watchEnabled) {
+    $("#watchStatus").textContent = "Scheduled; first check within ~1 min. Keep a MyPlan tab open.";
+  } else {
+    $("#watchStatus").textContent = "Watcher off.";
+  }
+
+  const ev = state.watchEvents || [];
+  $("#watchEvents").textContent = ev.length
+    ? ev
+        .slice()
+        .reverse()
+        .map(
+          (e) =>
+            `${new Date(e.t).toLocaleString()}  ${e.label || e.sln}  ${e.from}→${e.to}` +
+            (e.seatsOpen != null ? `  (${e.seatsOpen} open)` : "")
+        )
+        .join("\n")
+    : "No reopen events yet.";
 }
 
 function renderLastApplied() {
@@ -441,6 +532,102 @@ async function onClearLog() {
   await load();
 }
 
+async function onToggleSms(e) {
+  await persist({ smsEnabled: e.currentTarget.checked });
+}
+
+async function onGmailSignin() {
+  const status = $("#gmailStatus");
+  status.textContent = "Opening Google sign-in…";
+  const res = await chrome.runtime.sendMessage({ type: "gmail-signin" });
+  if (!res?.ok) {
+    status.textContent = `Sign-in failed: ${res?.error || "unknown"}. Check the OAuth setup in the README.`;
+  }
+  await load();
+}
+
+async function onGmailSignout() {
+  await chrome.runtime.sendMessage({ type: "gmail-signout" });
+  await load();
+}
+
+async function onToggleGmail(e) {
+  const enabled = e.currentTarget.checked;
+  await persist({ gmailEnabled: enabled });
+  await chrome.runtime.sendMessage({ type: "gmail-arm", enabled });
+  if (enabled) setTimeout(load, 1200);
+}
+
+async function onGmailTest() {
+  const status = $("#gmailStatus");
+  status.textContent = "Fetching latest Notify.UW email…";
+  const res = await chrome.runtime.sendMessage({ type: "gmail-test" });
+  if (!res?.ok) {
+    status.textContent = `Test failed: ${res?.error || "unknown"}. Sign in first, then retry.`;
+    return;
+  }
+  const acct = res.email ? ` (${res.email})` : "";
+  if (res.alerts && res.alerts.length) {
+    const list = res.alerts.map((a) => `${a.label || "?"} → SLN ${a.sln}`).join(", ");
+    status.textContent = `Parsed${acct}: ${list}. Wiring works — arm the checkbox to go live.`;
+  } else {
+    status.textContent = `Connected${acct}, but no recent "seats available" email found. Send a test email or wait for a real alert.`;
+  }
+}
+
+async function onOpenMessages() {
+  await chrome.runtime.sendMessage({ type: "open-messages" });
+}
+
+async function onWatchEdit(e) {
+  const i = parseInt(e.currentTarget.dataset.wi, 10);
+  const k = e.currentTarget.dataset.k;
+  const v = e.currentTarget.value.trim();
+  const list = (state.watchList || []).slice();
+  list[i] = { ...list[i], [k]: v };
+  await persist({ watchList: list });
+}
+
+async function onWatchDelete(e) {
+  const i = parseInt(e.currentTarget.dataset.wi, 10);
+  const list = (state.watchList || []).slice();
+  const removed = list.splice(i, 1)[0];
+  // Drop its snapshot entry so re-adding starts clean.
+  const snap = { ...(state.seatSnapshot || {}) };
+  if (removed && removed.sln) delete snap[removed.sln.trim()];
+  await persist({ watchList: list, seatSnapshot: snap });
+}
+
+async function onAddWatch() {
+  const list = [...(state.watchList || []), { sln: "", label: "" }];
+  await persist({ watchList: list });
+}
+
+async function onToggleWatch(e) {
+  await persist({ watchEnabled: e.currentTarget.checked });
+  await chrome.runtime.sendMessage({ type: "reschedule-watch" });
+  if (e.currentTarget.checked) {
+    await chrome.runtime.sendMessage({ type: "watch-now" });
+    setTimeout(load, 1000);
+  }
+}
+
+async function onWatchIntervalChange(e) {
+  const v = Math.max(1, parseInt(e.currentTarget.value, 10) || 5);
+  await persist({ watchIntervalMin: v });
+  await chrome.runtime.sendMessage({ type: "reschedule-watch" });
+}
+
+async function onWatchNow() {
+  await chrome.runtime.sendMessage({ type: "watch-now" });
+  setTimeout(load, 1200);
+}
+
+async function onClearWatchEvents() {
+  await UWStore.update({ watchEvents: [] });
+  await load();
+}
+
 async function onRefreshMyPlan() {
   const tabs = await chrome.tabs.query({ url: "https://myplan.uw.edu/*" });
   if (!tabs.length) {
@@ -485,6 +672,17 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#stepUpdate").addEventListener("click", onStepUpdate);
   $("#diagnose").addEventListener("click", onDiagnose);
   $("#refreshMyplan").addEventListener("click", onRefreshMyPlan);
+  $("#smsEnabled").addEventListener("change", onToggleSms);
+  $("#openMessages").addEventListener("click", onOpenMessages);
+  $("#gmailSignin").addEventListener("click", onGmailSignin);
+  $("#gmailSignout").addEventListener("click", onGmailSignout);
+  $("#gmailEnabled").addEventListener("change", onToggleGmail);
+  $("#gmailTest").addEventListener("click", onGmailTest);
+  $("#addWatch").addEventListener("click", onAddWatch);
+  $("#watchEnabled").addEventListener("change", onToggleWatch);
+  $("#watchInterval").addEventListener("change", onWatchIntervalChange);
+  $("#watchNow").addEventListener("click", onWatchNow);
+  $("#clearWatchEvents").addEventListener("click", onClearWatchEvents);
   $("#autoSubmit").addEventListener("change", onToggleAutoSubmit);
   $("#keepAlive").addEventListener("change", onToggleKeepAlive);
   $("#fireNow").addEventListener("click", onFireNow);

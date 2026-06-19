@@ -2,13 +2,16 @@
 
 try {
   // Paths are relative to the extension root in MV3 service workers.
-  importScripts("/lib/uw.js", "/lib/storage.js");
+  importScripts("/lib/uw.js", "/lib/storage.js", "/lib/notify.js", "/lib/gmail.js");
 } catch (e) {
   console.error("[uw-autoreg] importScripts failed", e);
 }
 
 const ALARM_REGISTER = "openRegister";
 const ALARM_KEEPALIVE = "keepAlive";
+const ALARM_WATCH = "watchSeats";
+const ALARM_GMAIL = "gmailHeartbeat";
+const NOTIF_REOPEN = "reopenNotif";
 
 // ---------------------------------------------------------------------------
 // Scheduling
@@ -41,9 +44,48 @@ async function scheduleKeepAlive() {
   }
 }
 
+async function scheduleWatch() {
+  const { watchEnabled, watchIntervalMin } = await UWStore.getAll();
+  await chrome.alarms.clear(ALARM_WATCH);
+  if (watchEnabled) {
+    const period = Math.max(
+      UW.WATCH_MIN_PERIOD_MIN,
+      Number(watchIntervalMin) || UW.WATCH_DEFAULT_PERIOD_MIN
+    );
+    chrome.alarms.create(ALARM_WATCH, {
+      periodInMinutes: period,
+      delayInMinutes: Math.min(1, period)
+    });
+    console.log("[uw-autoreg] reopen watcher scheduled every", period, "min");
+  } else {
+    console.log("[uw-autoreg] reopen watcher disabled");
+  }
+}
+
+async function scheduleGmail() {
+  const { gmailEnabled } = await UWStore.getAll();
+  await chrome.alarms.clear(ALARM_GMAIL);
+  if (gmailEnabled) {
+    // Heartbeat at Chrome's 1-min alarm floor. It runs a poll and, more
+    // importantly, restarts the sub-minute in-worker loop if the service
+    // worker had been killed since the last tick.
+    chrome.alarms.create(ALARM_GMAIL, {
+      periodInMinutes: UW.GMAIL_HEARTBEAT_MIN,
+      delayInMinutes: UW.GMAIL_HEARTBEAT_MIN
+    });
+    startGmailLoop();
+    console.log("[uw-autoreg] gmail trigger armed; heartbeat every", UW.GMAIL_HEARTBEAT_MIN, "min");
+  } else {
+    gmailLoopRunning = false; // signals the loop to stop on its next tick
+    console.log("[uw-autoreg] gmail trigger disarmed");
+  }
+}
+
 async function rescheduleAll() {
   await scheduleRegisterAlarm();
   await scheduleKeepAlive();
+  await scheduleWatch();
+  await scheduleGmail();
 }
 
 // ---------------------------------------------------------------------------
@@ -51,18 +93,23 @@ async function rescheduleAll() {
 // and stamp a submit-session marker so the content script knows to auto-act.
 // ---------------------------------------------------------------------------
 
-async function handleRegisterAlarm() {
-  console.log("[uw-autoreg] register alarm fired");
+async function handleRegisterAlarm(opts = {}) {
+  console.log("[uw-autoreg] register alarm fired", opts.targetSlns || "");
   const { autoSubmit } = await UWStore.getAll();
 
   // Always stamp a fresh submit-session (state machine token). The content
   // script will skip auto-submit if `autoSubmit` is false but still applies
-  // prefill/pruning as usual.
+  // prefill/pruning as usual. When `targetSlns` is set (e.g. an SMS seat
+  // alert), the content script fills exactly those SLNs instead of the
+  // configured winners, and does a single attempt (no conflict backup).
   const session = {
     startedAt: Date.now(),
     attempts: 0,
     lastAttemptAt: 0,
-    autoSubmit: !!autoSubmit
+    autoSubmit: !!autoSubmit,
+    targetSlns: Array.isArray(opts.targetSlns) && opts.targetSlns.length
+      ? opts.targetSlns
+      : null
   };
   await chrome.storage.local.set({ [UW.KEYS.SUBMIT_SESSION]: session });
 
@@ -136,6 +183,175 @@ async function handleKeepAlive() {
 }
 
 // ---------------------------------------------------------------------------
+// Reopened-class watcher: reload open MyPlan tab(s) so the content script
+// re-scrapes seat status. Detection of closed/waitlist -> open transitions
+// happens in content/myplan.js, which messages us "seat-opened".
+// ---------------------------------------------------------------------------
+
+async function handleWatch() {
+  const tabs = await chrome.tabs.query({ url: "https://myplan.uw.edu/*" });
+  let note = "";
+  if (tabs.length) {
+    for (const t of tabs) {
+      try {
+        await chrome.tabs.reload(t.id, { bypassCache: true });
+      } catch (e) {
+        console.warn("[uw-autoreg] watch reload failed for tab", t.id, e);
+      }
+    }
+    note = "ok";
+  } else {
+    // No MyPlan tab to scrape. Open one in the background so the next cycle
+    // (and this one, once it loads) can read seat status.
+    try {
+      await chrome.tabs.create({ url: UW.MYPLAN_URL, active: false });
+      note = "opened MyPlan tab (was none)";
+    } catch (e) {
+      note = "no MyPlan tab and could not open one";
+    }
+  }
+  const status = { lastCheckedAt: Date.now(), tabs: tabs.length, note };
+  await chrome.storage.local.set({ [UW.KEYS.WATCH_STATUS]: status });
+  console.log("[uw-autoreg] watch cycle", status);
+}
+
+// Fired by the MyPlan content script when a watched section reopened.
+async function handleSeatOpened(opened) {
+  if (!Array.isArray(opened) || !opened.length) return;
+
+  // Record events for the popup history.
+  const { watchEvents = [] } = await chrome.storage.local.get(UW.KEYS.WATCH_EVENTS);
+  const now = Date.now();
+  for (const o of opened) {
+    watchEvents.push({
+      t: now,
+      sln: o.sln,
+      label: o.label,
+      from: o.from,
+      to: o.to,
+      seatsOpen: o.seatsOpen ?? null
+    });
+  }
+  while (watchEvents.length > UW.WATCH_EVENTS_MAX) watchEvents.shift();
+  await chrome.storage.local.set({ [UW.KEYS.WATCH_EVENTS]: watchEvents });
+
+  // Desktop notification.
+  const labels = opened.map((o) => o.label || o.sln).join(", ");
+  try {
+    await chrome.notifications.create(NOTIF_REOPEN, {
+      type: "basic",
+      iconUrl: "/popup/icon128.png",
+      title: "UW seat opened",
+      message: `Reopened: ${labels}. Opening registration…`,
+      priority: 2,
+      requireInteraction: true
+    });
+  } catch (e) {
+    // iconUrl may be missing; retry without it so the alert still shows.
+    try {
+      await chrome.notifications.create(NOTIF_REOPEN, {
+        type: "basic",
+        title: "UW seat opened",
+        message: `Reopened: ${labels}. Opening registration…`,
+        priority: 2
+      });
+    } catch (_) {}
+  }
+
+  // Auto-fire the registration handler. handleRegisterAlarm respects the
+  // existing auto-submit toggle: if auto-submit is off it just opens/reloads
+  // register.uw and prefills; if on it submits. We skip if a submit session is
+  // already active so we don't stomp an in-flight 6 AM run.
+  const { submitSession } = await chrome.storage.local.get(UW.KEYS.SUBMIT_SESSION);
+  const sessionFresh =
+    submitSession && now - submitSession.startedAt <= UW.SUBMIT_SESSION_TTL_MS;
+  if (sessionFresh) {
+    console.log("[uw-autoreg] seat-opened: submit session already active; not re-firing");
+    return;
+  }
+
+  // Register the exact section(s) that opened, not the whole configured list.
+  const targetSlns = [...new Set(opened.map((o) => (o.sln || "").trim()).filter(Boolean))];
+  await handleRegisterAlarm({ targetSlns });
+}
+
+// ---------------------------------------------------------------------------
+// Gmail trigger: poll a dedicated inbox via the Gmail API for the Notify.UW
+// "seats available" email and fire registration at the exact SLN. Runs without
+// any open tab. chrome.alarms can't poll faster than 1 min, so the fast cadence
+// is an in-worker loop kept warm by its own fetches; the ALARM_GMAIL heartbeat
+// restarts it after a service-worker eviction. Because emails persist in the
+// inbox, a brief loop gap only adds latency — it never drops an alert.
+// ---------------------------------------------------------------------------
+
+let gmailLoopRunning = false;
+
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// A single poll cycle: read new Notify emails, fire on any fresh seat alert,
+// and persist status + handled-message ids. Errors are recorded, not thrown.
+async function gmailPollTick() {
+  const { gmailEnabled, gmailProcessed = {} } = await UWStore.getAll();
+  if (!gmailEnabled) return;
+
+  let status;
+  try {
+    const { alerts, ids, email } = await UWGmail.pollOnce(gmailProcessed);
+
+    if (ids.length) {
+      const now = Date.now();
+      for (const id of ids) gmailProcessed[id] = now;
+      // Prune oldest ids so the map can't grow without bound.
+      const entries = Object.entries(gmailProcessed).sort((a, b) => a[1] - b[1]);
+      while (entries.length > UW.GMAIL_PROCESSED_MAX) {
+        delete gmailProcessed[entries.shift()[0]];
+      }
+      await chrome.storage.local.set({ [UW.KEYS.GMAIL_PROCESSED]: gmailProcessed });
+    }
+
+    status = { lastCheckedAt: Date.now(), ok: true, email, reason: "ok" };
+
+    if (alerts.length) {
+      console.log("[uw-autoreg] gmail seat-open detected", alerts);
+      await handleSeatOpened(
+        alerts.map((a) => ({
+          sln: a.sln,
+          label: a.label || a.sln,
+          from: "closed",
+          to: "open",
+          source: "gmail"
+        }))
+      );
+    }
+  } catch (e) {
+    status = {
+      lastCheckedAt: Date.now(),
+      ok: false,
+      email: null,
+      reason: String(e?.message || e)
+    };
+    console.warn("[uw-autoreg] gmail poll failed", status.reason);
+  }
+  await chrome.storage.local.set({ [UW.KEYS.GMAIL_STATUS]: status });
+}
+
+// Sub-minute polling loop. Guarded so the heartbeat can't spawn a second copy.
+async function startGmailLoop() {
+  if (gmailLoopRunning) return;
+  gmailLoopRunning = true;
+  try {
+    while (gmailLoopRunning) {
+      const { gmailEnabled } = await UWStore.getAll();
+      if (!gmailEnabled) break;
+      await gmailPollTick();
+      await delay(UW.GMAIL_POLL_MS);
+    }
+  } finally {
+    gmailLoopRunning = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 
@@ -153,6 +369,33 @@ chrome.runtime.onStartup.addListener(async () => {
 chrome.alarms.onAlarm.addListener(async (a) => {
   if (a.name === ALARM_REGISTER) await handleRegisterAlarm();
   else if (a.name === ALARM_KEEPALIVE) await handleKeepAlive();
+  else if (a.name === ALARM_WATCH) await handleWatch();
+  else if (a.name === ALARM_GMAIL) {
+    // Heartbeat: poll once and make sure the fast loop is running.
+    await gmailPollTick();
+    startGmailLoop();
+  }
+});
+
+// Clicking the reopen notification focuses (or opens) the register tab.
+chrome.notifications.onClicked.addListener(async (id) => {
+  if (id !== NOTIF_REOPEN) return;
+  try {
+    await chrome.notifications.clear(id);
+    const tabs = await chrome.tabs.query({
+      url: ["https://register.uw.edu/*", "https://sdb.admin.uw.edu/*"]
+    });
+    if (tabs.length) {
+      await chrome.tabs.update(tabs[0].id, { active: true });
+      if (tabs[0].windowId != null) {
+        await chrome.windows.update(tabs[0].windowId, { focused: true });
+      }
+    } else {
+      await chrome.tabs.create({ url: UW.REGISTER_URL, active: true });
+    }
+  } catch (e) {
+    console.warn("[uw-autoreg] notification click handler failed", e);
+  }
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -176,6 +419,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           await chrome.tabs.create({ url: UW.MYPLAN_URL, active: true });
           sendResponse({ ok: true });
           break;
+        case "open-messages":
+          await chrome.tabs.create({ url: UW.MESSAGES_URL, active: true });
+          sendResponse({ ok: true });
+          break;
         case "fire-now":
           // Fires the registration handler immediately (manual test path).
           await handleRegisterAlarm();
@@ -183,6 +430,64 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         case "keepalive-now":
           await handleKeepAlive();
+          sendResponse({ ok: true });
+          break;
+        case "reschedule-watch":
+          await scheduleWatch();
+          sendResponse({ ok: true });
+          break;
+        case "watch-now":
+          await handleWatch();
+          sendResponse({ ok: true });
+          break;
+        case "seat-opened":
+          await handleSeatOpened(msg.opened);
+          sendResponse({ ok: true });
+          break;
+        case "gmail-signin": {
+          // Interactive consent / account chooser. Records the address.
+          const token = await UWGmail.getToken({ interactive: true });
+          const email = await UWGmail.profileEmail(token);
+          await chrome.storage.local.set({
+            [UW.KEYS.GMAIL_STATUS]: {
+              lastCheckedAt: Date.now(),
+              ok: true,
+              email,
+              reason: "signed in"
+            }
+          });
+          sendResponse({ ok: true, email });
+          break;
+        }
+        case "gmail-signout":
+          await UWGmail.signOut();
+          await chrome.storage.local.set({
+            [UW.KEYS.GMAIL_ENABLED]: false,
+            [UW.KEYS.GMAIL_STATUS]: null
+          });
+          await scheduleGmail();
+          sendResponse({ ok: true });
+          break;
+        case "gmail-arm":
+          await chrome.storage.local.set({ [UW.KEYS.GMAIL_ENABLED]: !!msg.enabled });
+          await scheduleGmail();
+          if (msg.enabled) await gmailPollTick(); // immediate first read
+          sendResponse({ ok: true });
+          break;
+        case "gmail-test": {
+          // One non-interactive poll, ignoring the dedupe map so it always
+          // reports the latest matching email. Read-only: never fires
+          // registration; just proves the account + parser are wired.
+          try {
+            const { alerts, email } = await UWGmail.pollOnce({});
+            sendResponse({ ok: true, alerts, email });
+          } catch (e) {
+            sendResponse({ ok: false, error: String(e?.message || e) });
+          }
+          break;
+        }
+        case "reset-seat-snapshot":
+          await chrome.storage.local.set({ [UW.KEYS.SEAT_SNAPSHOT]: {} });
           sendResponse({ ok: true });
           break;
         case "broadcast-register": {

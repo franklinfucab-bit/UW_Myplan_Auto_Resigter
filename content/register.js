@@ -359,7 +359,7 @@
 
   // "prefill" method: type the conflict-resolved SLNs into the Enter SLN box,
   // Add to cart, then (if auto) Update Schedule.
-  async function runPrefillAttempt(data, doSubmit) {
+  async function runPrefillAttempt(data, doSubmit, slnsOverride) {
     // Wait for the React app to finish mounting after the reload. Acting too
     // early was why test-fire filled nothing and the cart stayed empty.
     const ready = await waitUntil(
@@ -377,7 +377,10 @@
     }
     await sleep(UW.PAGE_SETTLE_MS);
 
-    const winners = resolveWinners(data, {});
+    const winners =
+      Array.isArray(slnsOverride) && slnsOverride.length
+        ? slnsOverride
+        : resolveWinners(data, {});
     const filled = await fillSlnBox(winners);
     await logStep("filled SLN box", filled ? winners.join(", ") : "FAILED");
     highlightButtons();
@@ -472,16 +475,40 @@
       return;
     }
 
+    const targets = Array.isArray(session.targetSlns)
+      ? session.targetSlns.filter(Boolean)
+      : [];
+
     // ---- Attempt 0: primary (EE 344 etc.) ----
     if (session.attempts === 0) {
       await resetLog();
-      await logStep("fire", `autoSubmit=${autoSubmit} session.autoSubmit=${session.autoSubmit} method=${method}`);
+      await logStep(
+        "fire",
+        `autoSubmit=${autoSubmit} session.autoSubmit=${session.autoSubmit} method=${method}` +
+          (targets.length ? ` target=${targets.join(",")}` : "")
+      );
+
+      // Seat-alert (SMS/watcher) path: fill exactly the section that opened,
+      // regardless of the configured method. No conflict backup applies.
+      if (targets.length) {
+        await runPrefillAttempt(data, autoSubmit && session.autoSubmit, targets);
+        return;
+      }
 
       if (method === "import") {
         await runImportAttempt(data, autoSubmit && session.autoSubmit);
       } else {
         await runPrefillAttempt(data, autoSubmit && session.autoSubmit);
       }
+      return;
+    }
+
+    // ---- Targeted seat-alert: judge result, no conflict backup ----
+    if (session.attempts === 1 && targets.length) {
+      await waitUntil(() => detectResult() !== "unknown", UW.RESULT_WAIT_MAX_MS, 250);
+      const result = detectResult();
+      await logStep("targeted attempt result", result);
+      await clearSession();
       return;
     }
 

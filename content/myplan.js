@@ -105,7 +105,63 @@
     } catch (e) {
       console.warn(TAG, "store-courses failed", e);
     }
+    try {
+      await detectReopen(rows);
+    } catch (e) {
+      console.warn(TAG, "detectReopen failed", e);
+    }
     return rows;
+  }
+
+  // Compare freshly scraped section statuses against the last snapshot and
+  // report any *watched* section that flipped closed/waitlist -> open. The
+  // snapshot lives in storage so a transition only fires once (it won't fire
+  // again until the section flips back to closed). Background handles the
+  // notification + optional auto-fire.
+  async function detectReopen(rows) {
+    const { watchEnabled, watchList = [], seatSnapshot = {} } =
+      await chrome.storage.local.get([
+        UW.KEYS.WATCH_ENABLED,
+        UW.KEYS.WATCH_LIST,
+        UW.KEYS.SEAT_SNAPSHOT
+      ]);
+    if (!watchEnabled || !watchList.length) return;
+
+    const bySln = new Map();
+    for (const r of rows) if (r.sln) bySln.set(r.sln, r);
+
+    const nextSnapshot = { ...seatSnapshot };
+    const opened = [];
+    for (const w of watchList) {
+      const sln = (w.sln || "").trim();
+      if (!sln) continue;
+      const row = bySln.get(sln);
+      if (!row) continue; // not on the page this scrape; leave prior status
+      const cur = row.statusText || "unknown";
+      const prev = seatSnapshot[sln];
+      nextSnapshot[sln] = cur;
+      // "reopened": was definitively closed/waitlisted, now open.
+      if (cur === "open" && (prev === "closed" || prev === "waitlist")) {
+        opened.push({
+          sln,
+          label: w.label || row.courseCode || sln,
+          from: prev,
+          to: cur,
+          seatsOpen: row.seatsOpen
+        });
+      }
+    }
+
+    await chrome.storage.local.set({ [UW.KEYS.SEAT_SNAPSHOT]: nextSnapshot });
+
+    if (opened.length) {
+      console.log(TAG, "reopened sections detected", opened);
+      try {
+        await chrome.runtime.sendMessage({ type: "seat-opened", opened });
+      } catch (e) {
+        console.warn(TAG, "seat-opened message failed", e);
+      }
+    }
   }
 
   // Run on load, then again after a short delay (MyPlan is an SPA so content
