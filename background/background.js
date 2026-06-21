@@ -42,6 +42,7 @@ async function scheduleKeepAlive() {
   } else {
     console.log("[uw-autoreg] keep-alive disabled");
   }
+  await updateKeepAwake();
 }
 
 async function scheduleWatch() {
@@ -60,6 +61,7 @@ async function scheduleWatch() {
   } else {
     console.log("[uw-autoreg] reopen watcher disabled");
   }
+  await updateKeepAwake();
 }
 
 async function scheduleGmail() {
@@ -79,6 +81,27 @@ async function scheduleGmail() {
     gmailLoopRunning = false; // signals the loop to stop on its next tick
     console.log("[uw-autoreg] gmail trigger disarmed");
   }
+  await updateKeepAwake();
+}
+
+// Keep the machine awake while we're actively hunting, so a sleeping laptop
+// doesn't shut the whole thing down. "system" level prevents OS sleep (CPU keeps
+// running so the poll loop + alarms fire) but still lets the display turn off.
+// Released when nothing is armed. NOTE: keep the laptop plugged in — on battery
+// Windows may sleep anyway, and keep-awake drains it.
+async function updateKeepAwake() {
+  try {
+    const { gmailEnabled, watchEnabled, keepAlive } = await UWStore.getAll();
+    if (gmailEnabled || watchEnabled || keepAlive) {
+      chrome.power.requestKeepAwake("system");
+      console.log("[uw-autoreg] keep-awake ON (a trigger is armed)");
+    } else {
+      chrome.power.releaseKeepAwake();
+      console.log("[uw-autoreg] keep-awake released (nothing armed)");
+    }
+  } catch (e) {
+    console.warn("[uw-autoreg] keep-awake failed", e);
+  }
 }
 
 async function rescheduleAll() {
@@ -86,6 +109,7 @@ async function rescheduleAll() {
   await scheduleKeepAlive();
   await scheduleWatch();
   await scheduleGmail();
+  await updateKeepAwake();
 }
 
 // ---------------------------------------------------------------------------

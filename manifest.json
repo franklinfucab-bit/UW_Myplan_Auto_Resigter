@@ -3,7 +3,7 @@
   "name": "UW MyPlan Auto-Register",
   "version": "0.1.0",
   "description": "Autofill SLNs on register.uw with conflict-group pruning (e.g. EE 344 > EE 280). Policy-compliant: you click Update Schedule.",
-  "permissions": ["storage", "alarms", "tabs", "scripting", "notifications", "identity"],
+  "permissions": ["storage", "alarms", "tabs", "scripting", "notifications", "identity", "power"],
   "host_permissions": [
     "https://myplan.uw.edu/*",
     "https://register.uw.edu/*",
