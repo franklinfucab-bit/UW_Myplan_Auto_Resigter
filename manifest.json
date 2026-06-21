@@ -3,6 +3,7 @@
   "name": "UW MyPlan Auto-Register",
   "version": "0.1.0",
   "description": "Autofill SLNs on register.uw with conflict-group pruning (e.g. EE 344 > EE 280). Policy-compliant: you click Update Schedule.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAkBg55ugo+tLeiFK8UtQyeeUOzhP+MTNMEkwLxuDHYcnfGS5hmyrfRVB+F4WGLC6nx9uLF+rDwvLEt5e4J86+c06rbzYCJE8ssXJLLf89j+TRoPW9TIDSAbteBrzJljXFfxTfJoMGyJlbW7ryrg6ntn86JRUXriWPVsxa2TEhpk5T5xWTXJrGY3yitDfXTyr0D8uIT2lomAjdL3iaLkktZlwbSChZNDj4Rj3n6nwzKPpdjOZVAwUrwLnPoHXG36etqM6Dn9Iy5bC387MMcsqiPzEltB4/6FCTaPQAns4qxfYFoITeTgG7PEIpGjkt8LSd/bzJyJDe7D+w/JUN5ixyMwIDAQAB",
   "permissions": ["storage", "alarms", "tabs", "scripting", "notifications", "identity", "power"],
   "host_permissions": [
     "https://myplan.uw.edu/*",
