@@ -94,6 +94,54 @@
     return !!session && Date.now() - session.startedAt <= UW.SUBMIT_SESSION_TTL_MS;
   }
 
+  // Set a form field's value the way real typing would (native setter so the
+  // browser/form sees the change), so a form submit actually carries it. Used
+  // for the stored-credential path, which doesn't depend on autofill.
+  function typeValue(el, value) {
+    try {
+      el.focus();
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value"
+      ).set;
+      setter.call(el, value);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
+    } catch (_) {}
+  }
+
+  // Chrome/Edge fill the saved password but keep its value hidden from scripts
+  // until a user interaction "commits" it (the user found that clicking anywhere
+  // on the page then makes sign-in work). Mirror that click with synthetic
+  // focus/blur/pointer events on the fields and the page. Synthetic events are
+  // untrusted so this isn't guaranteed, but it costs nothing and avoids storing
+  // the password when it does work.
+  function nudgeAutofill() {
+    const fire = (el, types) => {
+      for (const t of types) {
+        try {
+          el.dispatchEvent(
+            /pointer/.test(t)
+              ? new PointerEvent(t, { bubbles: true, cancelable: true })
+              : new MouseEvent(t, { bubbles: true, cancelable: true })
+          );
+        } catch (_) {}
+      }
+    };
+    try {
+      for (const el of [usernameField(), passwordField()]) {
+        if (!el) continue;
+        try { el.focus(); } catch (_) {}
+        fire(el, ["pointerdown", "mousedown", "mouseup", "click"]);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        try { el.blur(); } catch (_) {}
+      }
+      if (document.body) fire(document.body, ["pointerdown", "mousedown", "mouseup", "click"]);
+    } catch (_) {}
+  }
+
   let ran = false;
   async function main() {
     if (ran) return;
@@ -115,14 +163,90 @@
 
     await logStep("appears logged out (redirected to weblogin)", location.hostname);
 
+    // Cap auto sign-in attempts per registration run. A failed auto-login
+    // reloads this page, which would otherwise make us click Sign in again and
+    // again every ~14s and could LOCK the NetID. Count tries scoped to the
+    // current submit-session and give up (wait for manual sign-in) after the cap.
+    const { [UW.KEYS.WEBLOGIN_TRIES]: triesRaw } = await chrome.storage.local.get(
+      UW.KEYS.WEBLOGIN_TRIES
+    );
+    let tries = triesRaw && triesRaw.startedAt === session.startedAt ? triesRaw.count : 0;
+    if (tries >= UW.WEBLOGIN_MAX_TRIES) {
+      await logStep(
+        "weblogin: gave up",
+        `auto sign-in failed ${tries}x — sign in manually (it can't submit the browser-hidden password)`
+      );
+      await setLoginEvent("manual", "auto sign-in failed; sign in manually");
+      try {
+        (usernameField() || passwordField())?.focus();
+      } catch (_) {}
+      return;
+    }
+
+    // PREFERRED PATH: the user saved their NetID credentials in the popup. Type
+    // them in ourselves and click Sign in. Unlike the browser's autofill (whose
+    // value scripts can't submit), values we set are really in the form, so the
+    // submit carries them. Duo still applies (remembered ~30 days if trusted).
+    const { [UW.KEYS.WEBLOGIN_USER]: storedUser, [UW.KEYS.WEBLOGIN_PASS]: storedPass } =
+      await chrome.storage.local.get([UW.KEYS.WEBLOGIN_USER, UW.KEYS.WEBLOGIN_PASS]);
+    if (storedUser && storedPass) {
+      await sleep(UW.LOGIN_SETTLE_MS);
+      const u = usernameField();
+      const p = passwordField();
+      const signBtn = signInButton();
+      if (!u || !p || !signBtn) {
+        await logStep("weblogin: stored-cred sign-in waiting", "login form not ready yet");
+        await setLoginEvent("manual", "login form not found");
+        return;
+      }
+      typeValue(u, storedUser);
+      typeValue(p, storedPass);
+      await sleep(250);
+      await chrome.storage.local.set({
+        [UW.KEYS.WEBLOGIN_TRIES]: { startedAt: session.startedAt, count: tries + 1 }
+      });
+      await logStep(
+        "weblogin: signed in with stored credentials",
+        `attempt ${tries + 1}/${UW.WEBLOGIN_MAX_TRIES} (Duo may prompt)`
+      );
+      await setLoginEvent("auto-submitted", "submitted stored credentials (Duo may prompt)");
+      try {
+        signBtn.click();
+      } catch (e) {
+        try {
+          const form = p.form || signBtn.form;
+          if (form && typeof form.requestSubmit === "function") {
+            form.requestSubmit(signBtn.type === "submit" ? signBtn : undefined);
+          }
+        } catch (_) {}
+      }
+      return;
+    }
+
+    // Opt-in: the user has confirmed their NetID password is saved in this
+    // browser, so we should click Sign in even when Chrome hides the autofilled
+    // value from scripts (`pw.value` reads empty until a real user gesture).
+    const { [UW.KEYS.WEBLOGIN_AUTOCLICK]: autoclick } =
+      await chrome.storage.local.get(UW.KEYS.WEBLOGIN_AUTOCLICK);
+
     // Let the page settle, then wait for the browser to autofill the password.
+    // If Chrome exposes the value we use it; if not, we may still proceed below.
     await sleep(UW.LOGIN_SETTLE_MS);
     const deadline = Date.now() + UW.LOGIN_FILL_MAX_MS;
     let pw = passwordField();
+    let nudges = 0;
     while (Date.now() < deadline) {
       pw = passwordField();
       if (pw && pw.value) break;
+      // Try to commit the browser's autofill the way a manual click does.
+      if (nudges < 8) {
+        nudgeAutofill();
+        nudges++;
+      }
       await sleep(300);
+    }
+    if (pw && pw.value) {
+      await logStep("weblogin: password became readable", `after ${nudges} nudge(s)`);
     }
 
     const btn = signInButton();
@@ -132,34 +256,70 @@
       return;
     }
 
-    if (!pw || !pw.value) {
-      // Nothing autofilled - we won't submit a blank form. User must sign in.
+    const readableValue = !!(pw && pw.value);
+
+    if (!pw) {
+      // No password field at all - nothing to submit.
+      await logStep("weblogin: waiting on you", "no password field found - sign in manually");
+      await setLoginEvent("manual", "no password field");
+      return;
+    }
+
+    if (!readableValue && !autoclick) {
+      // Can't read a value AND the user hasn't confirmed a saved password, so we
+      // won't risk submitting a blank form. They must sign in (or enable the
+      // "browser has my password" toggle in the popup).
       await logStep(
         "weblogin: waiting on you",
-        "credentials not autofilled - sign in manually; flow resumes after"
+        "credentials not readable - sign in manually, or enable auto-click if your browser has the password saved"
       );
-      await setLoginEvent("manual", "credentials not autofilled");
+      await setLoginEvent("manual", "credentials not readable (enable auto-click if saved)");
       try {
         (usernameField() || pw)?.focus();
       } catch (_) {}
       return;
     }
 
-    // Nudge React/Shibboleth listeners in case autofill didn't fire events.
+    // Commit the browser's autofill the way a manual click does — focus the
+    // username then focus+BLUR the password (the user confirmed the blur is what
+    // makes the saved password "take"). Then nudge listeners. After this the
+    // password is committed into the form even if its value stays hidden from
+    // scripts, so clicking Sign in submits it.
+    nudgeAutofill();
     for (const el of [usernameField(), pw]) {
       if (el) {
         el.dispatchEvent(new Event("input", { bubbles: true }));
         el.dispatchEvent(new Event("change", { bubbles: true }));
       }
     }
-    await sleep(200);
+    try { pw.focus(); } catch (_) {}
+    await sleep(150);
+    try { pw.blur(); } catch (_) {}
+    await sleep(250);
 
-    await logStep("weblogin: clicked Sign in", "autofilled creds; Duo may still prompt");
+    // Record this attempt BEFORE submitting so a reload loop is capped even if
+    // the submit navigates away immediately.
+    await chrome.storage.local.set({
+      [UW.KEYS.WEBLOGIN_TRIES]: { startedAt: session.startedAt, count: tries + 1 }
+    });
+
+    const detail = readableValue
+      ? "autofilled creds; Duo may still prompt"
+      : `relying on browser-saved password (committed via blur); attempt ${tries + 1}/${UW.WEBLOGIN_MAX_TRIES}`;
+    await logStep("weblogin: clicked Sign in", detail);
     await setLoginEvent("auto-submitted", "clicked Sign in (Duo may prompt)");
+    // CLICK the actual Sign in button (what the user found works after the blur),
+    // falling back to a form submit if the click throws.
     try {
       btn.click();
     } catch (e) {
-      await logStep("weblogin: click failed", String(e));
+      await logStep("weblogin: click failed; trying form submit", String(e));
+      try {
+        const form = pw.form || btn.form;
+        if (form && typeof form.requestSubmit === "function") {
+          form.requestSubmit(btn.type === "submit" ? btn : undefined);
+        }
+      } catch (_) {}
     }
   }
 

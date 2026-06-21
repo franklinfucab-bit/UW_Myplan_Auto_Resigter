@@ -38,6 +38,18 @@
       </div>
     </section>
 
+    <section class="card">
+      <label class="card-title">Quarter / Term to register</label>
+      <input type="text" id="targetQuarter" placeholder="e.g. Autumn 2026 — blank = use whatever the page shows" />
+      <p class="hint">
+        Before filling SLNs, the extension switches register.uw to this term
+        (the selector at the top-left). Type it as the page shows it (e.g.
+        <b>Autumn 2026</b>). Leave blank to register whatever quarter is
+        currently displayed.
+      </p>
+      <p class="hint" id="quarterStatus"></p>
+    </section>
+
     <section class="card danger">
       <label class="card-title">Sleep-through mode (auto-submit) — risky</label>
       <div class="toggle-row">
@@ -48,6 +60,27 @@
         <label><input type="checkbox" id="keepAlive" /> Keep SSO session alive (ping every 20 min)</label>
         <span id="keepAliveState" class="hint"></span>
       </div>
+      <div class="card-head" style="margin-top:8px">
+        <label class="card-title">NetID auto-login (stored credentials)</label>
+        <span id="netidStatus" class="hint"></span>
+      </div>
+      <div class="alarm-row">
+        <input type="text" id="netidUser" placeholder="UW NetID (username)" autocomplete="off" spellcheck="false" />
+      </div>
+      <div class="alarm-row">
+        <input type="password" id="netidPass" placeholder="NetID password" autocomplete="new-password" />
+        <button id="saveNetid" class="primary">Save</button>
+        <button id="clearNetid" class="secondary">Clear</button>
+      </div>
+      <p class="hint warn-hint">
+        ⚠️ Stored <b>locally on this device, roughly in plain text</b>. Your NetID
+        unlocks email, grades, and finances — only use this on your personal
+        machine and click <b>Clear</b> when you're done. The extension types these
+        into the UW NetID sign-in page only; they're never sent anywhere else.
+        UW's SSO hard-expires every 12h, so this is what lets an unattended run
+        re-login. Duo still applies — choose "trust this browser" once so it's
+        remembered ~30 days.
+      </p>
       <p class="hint warn-hint">
         UW policy forbids automated submission. With auto-submit on, the
         extension fills SLNs, waits 1.5&ndash;3s, clicks Update Schedule once,
@@ -94,6 +127,37 @@
         <button id="addGroup" class="mini">+ Group</button>
       </div>
       <div id="groups"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <label class="card-title">Drop-to-add (swap to make space)</label>
+        <button id="addReplacement" class="mini">+ Add</button>
+      </div>
+      <p class="hint">
+        When the <b>Want</b> SLN gets into the cart, the extension checks the
+        <b>Drop</b> class's Drop box <i>before</i> Update Schedule, so it swaps
+        them in one submission (frees credits when you're at the cap). Example:
+        Want <b>E E 474 (10973)</b>, Drop <b>CSE 374 (10822)</b>.
+      </p>
+      <table id="replacementTable" class="grid">
+        <thead>
+          <tr>
+            <th>Want label</th>
+            <th>Want SLN</th>
+            <th>Drop label</th>
+            <th>Drop SLN</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p class="hint warn-hint">
+        ⚠️ This really drops a class. The add + drop submit together; if the
+        wanted section fills in the split second before submit, you could drop
+        without adding. Only used in auto-submit mode, after the wanted SLN is
+        confirmed in the cart.
+      </p>
     </section>
 
     <section class="card">

@@ -97,6 +97,24 @@ test("parses an email blob (subject + body + footer)", () => {
   assert.deepStrictEqual(r, [{ sln: "12815", label: "CSE 333 A" }]);
 });
 
+test("parses a real captured Notify.UW email verbatim", () => {
+  // Exact email from notify-noreply@uw.edu (captured 2025-11-07).
+  const emailBlob = [
+    "Notify.UW: E E 271 A has seats available", // subject
+    "E E 271 A (SLN: 13649) has seats available. Go to UW Registration.", // snippet
+    "",
+    "E E 271 A (SLN: 13649) has seats available. Go to UW Registration.",
+    "",
+    "Do NOT reply to this email.",
+    "",
+    "To edit your course availability notification subscriptions, visit Notify.UW.",
+    "",
+    "For support, please email help@uw.edu."
+  ].join("\n");
+  const r = parseSeatAlerts(emailBlob);
+  assert.deepStrictEqual(r, [{ sln: "13649", label: "E E 271 A" }]);
+});
+
 test("parses a spaced-department email and ignores the manage-subscriptions line", () => {
   const emailBlob = [
     "Notify.UW: A seat is available in E E 474 A",

@@ -24,6 +24,13 @@
 
   // ----- React-aware input setting -------------------------------------
 
+  // The live React props for a DOM node (React 17+ attaches them under a
+  // __reactProps$<hash> key). Used to call a component's own onChange directly.
+  function reactProps(el) {
+    const k = el && Object.keys(el).find((x) => x.startsWith("__reactProps$"));
+    return k ? el[k] : null;
+  }
+
   function setReactValue(el, value) {
     const proto =
       el.tagName === "TEXTAREA"
@@ -32,8 +39,39 @@
     const desc = Object.getOwnPropertyDescriptor(proto, "value");
     if (desc && desc.set) desc.set.call(el, value);
     else el.value = value;
+    // The register.uw "Enter SLN" box is a react-autosuggest input: it only
+    // commits the value into its controlled React state when ITS OWN onChange
+    // runs. A bare native input event isn't enough (the value shows in the DOM
+    // but Add to cart still sees an empty section), so call the React onChange
+    // prop directly with the value already set on el. Falls back to plain events
+    // for ordinary inputs.
+    const props = reactProps(el);
+    if (props && typeof props.onChange === "function") {
+      try {
+        props.onChange({
+          target: el,
+          currentTarget: el,
+          type: "change",
+          bubbles: true,
+          nativeEvent: new Event("input"),
+          preventDefault() {},
+          stopPropagation() {}
+        });
+      } catch (_) {}
+    }
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  // A rendered react-autosuggest option whose text contains `sln` (e.g.
+  // "13956 (E E 474 A)"). Clicking it is a belt-and-suspenders commit in case
+  // the onChange call alone doesn't stick.
+  function findSlnSuggestion(sln) {
+    if (!sln) return null;
+    const box =
+      document.getElementById("react-autowhatever-sln-suggest") || document;
+    const nodes = Array.from(box.querySelectorAll('li, [role="option"]'));
+    return nodes.find((n) => visible(n) && (n.textContent || "").includes(sln)) || null;
   }
 
   // ----- Element finders (by visible text, since ids are unknown) -------
@@ -88,6 +126,76 @@
   // The collapsible "Enter SLN" trigger that reveals the sln-suggest input.
   const findEnterSlnTrigger = () =>
     findButtonByText(/^enter\s*sln$/i, /add|cart|import/i);
+
+  // ----- Quarter / term selection --------------------------------------
+  //
+  // register.uw's term picker is a native <select id="quater-selection"> (their
+  // spelling) with options like "Summer 2026" / "Autumn 2026". We switch terms
+  // by setting the select value React-aware (native setter + change event),
+  // which makes the app navigate to that term (URL hash e.g. #/au26) before we
+  // fill. Verified live: setting the value this way does switch the view.
+
+  function findQuarterSelect() {
+    const byId = document.getElementById("quater-selection");
+    if (byId && byId.tagName === "SELECT") return byId;
+    // Fallback: any <select> whose options look like terms.
+    return (
+      Array.from(document.querySelectorAll("select")).find((sel) =>
+        Array.from(sel.options).some((o) => UW.QUARTER_RE.test(o.text))
+      ) || null
+    );
+  }
+
+  // Text of the currently selected term, e.g. "Summer 2026".
+  function selectedQuarterText(sel) {
+    const s = sel || findQuarterSelect();
+    const opt = s && s.options[s.selectedIndex];
+    return opt ? opt.text.replace(/\s+/g, " ").trim() : "";
+  }
+
+  // Ensure register.uw is on `target` (e.g. "Autumn 2026"). Returns a short
+  // status string for logging. No-op ("skip") when target is blank.
+  async function ensureQuarter(target) {
+    const want = (target || "").trim();
+    if (!want) return "skip";
+
+    const sel = findQuarterSelect();
+    // The term <select> only appears during the summer window when two terms are
+    // registrable at once. Outside that, there's a single term and no selector -
+    // nothing to switch, so use the current page.
+    if (!sel) return "no term selector (single-term period); using current term";
+
+    const cur = selectedQuarterText(sel);
+    if (cur.toLowerCase().includes(want.toLowerCase())) return "already " + cur;
+
+    const opt = Array.from(sel.options).find((o) =>
+      o.text.toLowerCase().includes(want.toLowerCase())
+    );
+    if (!opt) {
+      const have = Array.from(sel.options).map((o) => o.text).join(" | ");
+      return `option "${want}" not found (have: ${have})`;
+    }
+
+    // React-aware value set so the app actually navigates to the new term.
+    const desc = Object.getOwnPropertyDescriptor(
+      window.HTMLSelectElement.prototype,
+      "value"
+    );
+    if (desc && desc.set) desc.set.call(sel, opt.value);
+    else sel.value = opt.value;
+    sel.dispatchEvent(new Event("input", { bubbles: true }));
+    sel.dispatchEvent(new Event("change", { bubbles: true }));
+
+    // The app re-renders for the new term; wait for the selector to reflect it
+    // (re-queried each poll since React may replace the element).
+    const ok = await waitUntil(
+      () => selectedQuarterText().toLowerCase().includes(want.toLowerCase()),
+      UW.QUARTER_SWITCH_MAX_MS,
+      250
+    );
+    await sleep(UW.PAGE_SETTLE_MS);
+    return ok ? "switched to " + selectedQuarterText() : `set "${want}" but term didn't change`;
+  }
 
   // The "Enter SLN" text box.
   function findSlnInput() {
@@ -154,7 +262,9 @@
           UW.KEYS.OVERRIDE,
           UW.KEYS.METHOD,
           UW.KEYS.AUTO_SUBMIT,
-          UW.KEYS.SUBMIT_SESSION
+          UW.KEYS.SUBMIT_SESSION,
+          UW.KEYS.TARGET_QUARTER,
+          UW.KEYS.REPLACEMENTS
         ],
         (data) => resolve(data)
       )
@@ -267,7 +377,19 @@
       input.focus();
     } catch (_) {}
     setReactValue(input, list.join(", "));
-    await sleep(120);
+    await sleep(400);
+    // react-autosuggest commit: if the dropdown rendered a suggestion for our
+    // SLN, click it so the section is locked in (single-SLN path: seat alerts
+    // and reopened classes). This + the onChange call in setReactValue is what
+    // makes "Add to cart" actually receive the section.
+    if (list.length === 1) {
+      const opt = findSlnSuggestion(list[0]);
+      if (opt) {
+        opt.click();
+        await sleep(250);
+        console.log(TAG, "selected SLN suggestion", list[0]);
+      }
+    }
     console.log(TAG, "filled SLN box with", list.join(", "));
     return true;
   }
@@ -305,7 +427,130 @@
     return false;
   }
 
-  function clickUpdateSchedule() {
+  // Fill the SLN box + click Add to cart, and VERIFY the cart actually
+  // populated. register.uw's react-autosuggest box is timing-sensitive: a single
+  // fill+click sometimes lands before the section is committed, leaving the cart
+  // empty. So retry the local fill+add until the cart shows an item (this only
+  // re-clicks "Add to cart" on the page — it never re-submits to the server, so
+  // there's no retry-storm). Returns true once the cart is non-empty.
+  async function ensureInCart(slnList, maxTries = 3) {
+    for (let attempt = 1; attempt <= maxTries; attempt++) {
+      await fillSlnBox(slnList);
+      await sleep(jitter(300, 600));
+      clickAddToCart();
+      const ok = await waitUntil(() => !cartIsEmpty(), 3000, 200);
+      if (ok) {
+        await sleep(300);
+        await logStep("cart filled?", `true (attempt ${attempt})`);
+        return true;
+      }
+      await logStep("cart still empty; retrying add", `attempt ${attempt}/${maxTries}`);
+      await sleep(400);
+    }
+    await logStep("cart filled?", "false (gave up after retries)");
+    return false;
+  }
+
+  // The registered-schedule row's Drop checkbox for a given SLN. Each schedule
+  // row leads with the SLN (e.g. "10822 CSE 374 A …") and holds one checkbox, so
+  // we match the row whose text STARTS WITH the exact SLN (\b avoids 10972 vs
+  // 10973 collisions). Not by the checkbox id (`drop-<sln><rowindex>`).
+  function findDropCheckbox(sln) {
+    const s = String(sln || "").trim();
+    if (!s) return null;
+    const re = new RegExp("^\\s*" + s + "\\b");
+    const boxes = Array.from(document.querySelectorAll('input[type="checkbox"]'));
+    return (
+      boxes.find((cb) => {
+        const row = cb.closest("tr");
+        return row && re.test((row.innerText || "").trim());
+      }) || null
+    );
+  }
+
+  // Check the Drop box for `sln` (idempotent). Returns true if it ends up checked.
+  function markDrop(sln) {
+    const cb = findDropCheckbox(sln);
+    if (!cb) return false;
+    if (cb.checked) return true;
+    try {
+      cb.click();
+    } catch (_) {}
+    if (cb.checked) return true;
+    // Fallback: drive React's onChange directly.
+    const props = reactProps(cb);
+    if (props && typeof props.onChange === "function") {
+      try {
+        props.onChange({ target: cb, currentTarget: cb, type: "change", bubbles: true });
+      } catch (_) {}
+    }
+    return cb.checked;
+  }
+
+  // For each SLN we're registering that has a configured replacement, check the
+  // replaced class's Drop box so Update Schedule swaps them (drop to make space).
+  // Only call this right before submitting, after the want-SLN is confirmed in
+  // the cart, so we never drop a class without the new one staged.
+  async function markReplacementDrops(winners, replacements) {
+    const wins = new Set((winners || []).map((s) => String(s).trim()));
+    for (const r of replacements || []) {
+      if (!r || !wins.has(String(r.wantSln).trim())) continue;
+      const ok = markDrop(r.dropSln);
+      await logStep(
+        "marked drop for swap",
+        `${r.dropLabel || r.dropSln} (drop) <- ${r.wantLabel || r.wantSln}: ${ok ? "checked" : "NOT FOUND"}`
+      );
+    }
+  }
+
+  // The "Drop Section? … Drop and Update Schedule" confirm button that register.uw
+  // pops up whenever a drop is part of the submission. No id, matched by text.
+  const findConfirmDropButton = () =>
+    findButtonByText(/drop\s*and\s*update\s*schedule/i);
+
+  // True if `sln` is currently in the registered schedule (its row -> Drop box).
+  const isRegistered = (sln) => !!findDropCheckbox(sln);
+
+  // Safety net for swaps: register.uw's drop and the cart add aren't guaranteed
+  // atomic, so a swap can drop the old class while the wanted SLN fails to add
+  // (e.g. it filled in the split second before submit). After submitting, if the
+  // wanted SLN is NOT registered but its replaced class WAS dropped, add the
+  // dropped class straight back (best-effort — its seat may already be gone).
+  async function maybeRecoverDrops(winners, replacements) {
+    const wins = new Set((winners || []).map((s) => String(s).trim()));
+    const reps = (replacements || []).filter((r) => r && wins.has(String(r.wantSln).trim()));
+    if (!reps.length) return;
+    await waitUntil(() => detectResult() !== "unknown", UW.RESULT_WAIT_MAX_MS, 250);
+    await sleep(UW.PAGE_SETTLE_MS);
+    for (const r of reps) {
+      if (isRegistered(r.wantSln)) {
+        await logStep("swap ok", `${r.wantLabel || r.wantSln} registered`);
+        continue;
+      }
+      if (isRegistered(r.dropSln)) {
+        // Not added, but the old class is still there — nothing was lost.
+        await logStep("swap: nothing dropped", `${r.wantLabel || r.wantSln} not added; ${r.dropLabel || r.dropSln} kept`);
+        continue;
+      }
+      // Worst case: dropped the old class but didn't add the new one. Recover.
+      await logStep(
+        "SWAP HALF-FAILED — recovering",
+        `${r.dropLabel || r.dropSln} got dropped but ${r.wantLabel || r.wantSln} not registered; re-adding`
+      );
+      const re = await ensureInCart([String(r.dropSln).trim()]);
+      if (re) {
+        await clickUpdateSchedule();
+        await waitUntil(() => detectResult() !== "unknown", UW.RESULT_WAIT_MAX_MS, 250);
+        await sleep(UW.PAGE_SETTLE_MS);
+      }
+      await logStep(
+        "recover re-add",
+        isRegistered(r.dropSln) ? "recovered the dropped class ✓" : "FAILED to re-add — fix manually NOW"
+      );
+    }
+  }
+
+  async function clickUpdateSchedule() {
     const btn = findUpdateButton();
     if (!btn) {
       console.warn(TAG, "Update Schedule button not found");
@@ -313,6 +558,17 @@
     }
     btn.click();
     console.log(TAG, "clicked Update Schedule");
+    // If a drop is staged, UW shows a "Drop Section?" confirm dialog; we must
+    // click "Drop and Update Schedule" to actually submit. (No dialog when
+    // there's no drop, so this is a no-op then.)
+    const appeared = await waitUntil(() => findConfirmDropButton(), 3500, 150);
+    if (appeared) {
+      const cbtn = findConfirmDropButton();
+      if (cbtn) {
+        cbtn.click();
+        await logStep("confirmed drop", "clicked Drop and Update Schedule");
+      }
+    }
     return true;
   }
 
@@ -377,6 +633,13 @@
     }
     await sleep(UW.PAGE_SETTLE_MS);
 
+    const qStatus = await ensureQuarter(data[UW.KEYS.TARGET_QUARTER]);
+    await logStep("quarter", qStatus);
+    if (qStatus.startsWith("switched")) {
+      // Term switch re-renders the page; wait for the SLN box to come back.
+      await waitUntil(() => findSlnInput(), UW.PAGE_READY_MAX_MS, 250);
+    }
+
     const winners =
       Array.isArray(slnsOverride) && slnsOverride.length
         ? slnsOverride
@@ -395,17 +658,30 @@
       return;
     }
 
-    await sleep(jitter(400, 900));
-    const added = clickAddToCart();
-    await logStep("clicked Add to cart", added);
-    await waitForCart();
-    await logStep("cart filled?", !cartIsEmpty());
+    // Add to cart with verification + retry (handles the typeahead timing race).
+    const inCart = await ensureInCart(winners);
+    if (!inCart) {
+      await logStep("aborted", "could not add to cart after retries; not submitting");
+      await clearSession();
+      return;
+    }
+
+    // Swap support: only NOW that the wanted SLN is staged in the cart, check the
+    // Drop box of its configured replacement so the submit does add+drop together
+    // (frees credit space). Done after cart-confirm so we never drop for nothing.
+    await markReplacementDrops(winners, data[UW.KEYS.REPLACEMENTS] || []);
 
     await sleep(jitter(UW.SUBMIT_DELAY_MIN_MS, UW.SUBMIT_DELAY_MAX_MS));
     await patchSession({ attempts: 1, lastAttemptAt: Date.now() });
-    const clicked = clickUpdateSchedule();
+    const clicked = await clickUpdateSchedule();
     await logStep("clicked Update Schedule", clicked);
-    if (!clicked) await clearSession();
+    if (!clicked) {
+      await clearSession();
+      return;
+    }
+    // Safety net for swaps: if we dropped a class but the wanted SLN didn't end
+    // up registered, add the dropped class right back.
+    await maybeRecoverDrops(winners, data[UW.KEYS.REPLACEMENTS] || []);
   }
 
   // "import" method: click the page's own "Import from MyPlan" button so the
@@ -427,6 +703,13 @@
     }
     await sleep(UW.PAGE_SETTLE_MS);
 
+    const qStatus = await ensureQuarter(data[UW.KEYS.TARGET_QUARTER]);
+    await logStep("quarter", qStatus);
+    if (qStatus.startsWith("switched")) {
+      // Term switch re-renders the page; wait for the Import button to come back.
+      await waitUntil(() => findImportButton(), UW.PAGE_READY_MAX_MS, 250);
+    }
+
     const importBtn = findImportButton();
     if (!importBtn) {
       await logStep("aborted", "Import from MyPlan button not found");
@@ -447,7 +730,7 @@
 
     await sleep(jitter(UW.SUBMIT_DELAY_MIN_MS, UW.SUBMIT_DELAY_MAX_MS));
     await patchSession({ attempts: 1, lastAttemptAt: Date.now() });
-    const clicked = clickUpdateSchedule();
+    const clicked = await clickUpdateSchedule();
     await logStep("clicked Update Schedule", clicked);
     if (!clicked) await clearSession();
   }
@@ -551,7 +834,7 @@
       await waitForCart();
       await sleep(jitter(UW.SUBMIT_DELAY_MIN_MS, UW.SUBMIT_DELAY_MAX_MS));
       await patchSession({ attempts: 2, lastAttemptAt: Date.now() });
-      const clicked = clickUpdateSchedule();
+      const clicked = await clickUpdateSchedule();
       await logStep("backup: clicked Update Schedule", clicked);
       if (!clicked) await clearSession();
       return;
@@ -613,6 +896,13 @@
       addToCart: add ? { found: true, id: add.id, text: ownText(add) } : { found: false },
       updateSchedule: upd ? { found: true, id: upd.id, text: ownText(upd) } : { found: false },
       importFromMyPlan: imp ? { found: true, text: ownText(imp) } : { found: false },
+      quarter: {
+        current: selectedQuarterText() || null,
+        options: (() => {
+          const s = findQuarterSelect();
+          return s ? Array.from(s.options).map((o) => o.text) : null;
+        })()
+      },
       lastResult: detectResult(),
       allButtons
     };
@@ -656,7 +946,7 @@
             sendResponse({ ok: clickAddToCart() });
             break;
           case "update-schedule":
-            sendResponse({ ok: clickUpdateSchedule() });
+            sendResponse({ ok: await clickUpdateSchedule() });
             break;
           case "import-myplan": {
             const imp = findImportButton();

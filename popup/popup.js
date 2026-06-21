@@ -26,15 +26,18 @@ function uid() {
 
 function render() {
   renderMethod();
+  renderQuarter();
   renderAlarm();
   renderSlns();
   renderGroups();
+  renderReplacements();
   renderCourses();
   renderGmail();
   renderSms();
   renderWatch();
   renderLastApplied();
   renderDanger();
+  renderNetid();
   renderModeBanner();
   renderLoginNotice();
   renderRunLog();
@@ -130,6 +133,19 @@ function renderMethod() {
       : "When the register.uw page loads, SLNs from the lists below will be filled into the SDB form.";
 }
 
+function renderQuarter() {
+  const el = $("#targetQuarter");
+  if (!el) return;
+  // Don't clobber what the user is mid-typing.
+  if (document.activeElement !== el) el.value = state.targetQuarter || "";
+  const status = $("#quarterStatus");
+  if (status) {
+    status.textContent = state.targetQuarter
+      ? `Will switch register.uw to "${state.targetQuarter}" before registering.`
+      : "No target set — registers the currently shown quarter.";
+  }
+}
+
 function renderAlarm() {
   const iso = state.registerAlarmTime;
   if (iso) {
@@ -170,6 +186,34 @@ function renderSlns() {
     el.addEventListener("blur", onSlnEdit);
   });
   $$("#slnTable .x").forEach((el) => el.addEventListener("click", onSlnDelete));
+}
+
+function renderReplacements() {
+  const tbody = $("#replacementTable tbody");
+  if (!tbody) return;
+  const rows = state.replacements || [];
+  tbody.innerHTML = "";
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="5" class="hint">No swaps. Click + Add.</td></tr>`;
+  } else {
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td><input type="text" data-ri="${i}" data-k="wantLabel" placeholder="E E 474" value="${escapeAttr(r.wantLabel || "")}"></td>
+        <td><input type="text" data-ri="${i}" data-k="wantSln" placeholder="5-digit" maxlength="5" inputmode="numeric" value="${escapeAttr(r.wantSln || "")}"></td>
+        <td><input type="text" data-ri="${i}" data-k="dropLabel" placeholder="CSE 374" value="${escapeAttr(r.dropLabel || "")}"></td>
+        <td><input type="text" data-ri="${i}" data-k="dropSln" placeholder="5-digit" maxlength="5" inputmode="numeric" value="${escapeAttr(r.dropSln || "")}"></td>
+        <td><span class="x" data-ri="${i}" data-act="del-rep">×</span></td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+  $$("#replacementTable input").forEach((el) => {
+    el.addEventListener("change", onReplacementEdit);
+    el.addEventListener("blur", onReplacementEdit);
+  });
+  $$("#replacementTable .x").forEach((el) => el.addEventListener("click", onReplacementDelete));
 }
 
 function renderGroups() {
@@ -370,6 +414,27 @@ async function onAddSln() {
   await persist({ slns });
 }
 
+async function onReplacementEdit(e) {
+  const i = parseInt(e.currentTarget.dataset.ri, 10);
+  const k = e.currentTarget.dataset.k;
+  const v = e.currentTarget.value.trim();
+  const reps = (state.replacements || []).slice();
+  reps[i] = { ...reps[i], [k]: v };
+  await persist({ replacements: reps });
+}
+
+async function onReplacementDelete(e) {
+  const i = parseInt(e.currentTarget.dataset.ri, 10);
+  const reps = (state.replacements || []).slice();
+  reps.splice(i, 1);
+  await persist({ replacements: reps });
+}
+
+async function onAddReplacement() {
+  const reps = [...(state.replacements || []), { wantSln: "", dropSln: "", wantLabel: "", dropLabel: "" }];
+  await persist({ replacements: reps });
+}
+
 async function onGroupEdit(e) {
   const gi = parseInt(e.currentTarget.dataset.gi, 10);
   const mi = e.currentTarget.dataset.mi != null ? parseInt(e.currentTarget.dataset.mi, 10) : null;
@@ -414,6 +479,10 @@ async function onAddGroup() {
     }
   ];
   await persist({ conflictGroups: groups });
+}
+
+async function onTargetQuarterEdit(e) {
+  await persist({ targetQuarter: e.currentTarget.value.trim() });
 }
 
 async function onReschedule() {
@@ -505,6 +574,41 @@ async function onToggleAutoSubmit(e) {
       await persist({ method: "prefill" });
     }
   }
+}
+
+function renderNetid() {
+  const userEl = $("#netidUser");
+  if (userEl && document.activeElement !== userEl) {
+    userEl.value = state.webloginUser || "";
+  }
+  const status = $("#netidStatus");
+  if (status) {
+    status.textContent =
+      state.webloginUser && state.webloginPass
+        ? `Saved for ${state.webloginUser} — auto-login armed.`
+        : "Not set.";
+  }
+}
+
+async function onSaveNetid() {
+  const user = ($("#netidUser").value || "").trim();
+  const pass = $("#netidPass").value || "";
+  if (!user || !pass) {
+    $("#netidStatus").textContent = "Enter both NetID and password.";
+    return;
+  }
+  await persist({ webloginUser: user, webloginPass: pass });
+  $("#netidPass").value = ""; // don't leave the password sitting in the field
+  $("#netidStatus").textContent = `Saved for ${user} — auto-login armed.`;
+}
+
+async function onClearNetid() {
+  await persist({ webloginUser: "", webloginPass: "" });
+  const u = $("#netidUser");
+  const p = $("#netidPass");
+  if (u) u.value = "";
+  if (p) p.value = "";
+  $("#netidStatus").textContent = "Cleared.";
 }
 
 async function onToggleKeepAlive(e) {
@@ -661,7 +765,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   $$(".seg-btn").forEach((b) => b.addEventListener("click", onMethodClick));
   $("#addSln").addEventListener("click", onAddSln);
   $("#addGroup").addEventListener("click", onAddGroup);
+  $("#addReplacement").addEventListener("click", onAddReplacement);
   $("#rescheduleBtn").addEventListener("click", onReschedule);
+  $("#targetQuarter").addEventListener("change", onTargetQuarterEdit);
+  $("#targetQuarter").addEventListener("blur", onTargetQuarterEdit);
   $("#openRegister").addEventListener("click", onOpenRegister);
   $("#openMyPlan").addEventListener("click", onOpenMyPlan);
   $("#tryBackup").addEventListener("click", onTryBackup);
@@ -685,6 +792,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#clearWatchEvents").addEventListener("click", onClearWatchEvents);
   $("#autoSubmit").addEventListener("change", onToggleAutoSubmit);
   $("#keepAlive").addEventListener("change", onToggleKeepAlive);
+  $("#saveNetid").addEventListener("click", onSaveNetid);
+  $("#clearNetid").addEventListener("click", onClearNetid);
   $("#fireNow").addEventListener("click", onFireNow);
   $("#clearSession").addEventListener("click", onClearSession);
   $("#clearLog").addEventListener("click", onClearLog);
