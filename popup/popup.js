@@ -566,8 +566,9 @@ async function onDiagnose() {
 }
 
 async function onToggleAutoSubmit(e) {
-  await persist({ autoSubmit: e.currentTarget.checked });
-  if (e.currentTarget.checked && state.method !== "prefill") {
+  const checked = e.currentTarget.checked; // capture before any await (currentTarget nulls out after)
+  await persist({ autoSubmit: checked });
+  if (checked && state.method !== "prefill") {
     // Auto-submit is much more reliable with prefill (no Import-button click
     // required). Suggest switching but don't force it.
     if (confirm("Auto-submit works best with 'Direct SLN prefill' method. Switch to it?")) {
@@ -612,9 +613,10 @@ async function onClearNetid() {
 }
 
 async function onToggleKeepAlive(e) {
-  await persist({ keepAlive: e.currentTarget.checked });
+  const checked = e.currentTarget.checked; // capture before await (currentTarget nulls out after)
+  await persist({ keepAlive: checked });
   await chrome.runtime.sendMessage({ type: "reschedule-keepalive" });
-  if (e.currentTarget.checked) {
+  if (checked) {
     // Trigger an immediate ping so the user sees status right away.
     await chrome.runtime.sendMessage({ type: "keepalive-now" });
     setTimeout(load, 1000);
@@ -708,9 +710,10 @@ async function onAddWatch() {
 }
 
 async function onToggleWatch(e) {
-  await persist({ watchEnabled: e.currentTarget.checked });
+  const checked = e.currentTarget.checked; // capture before await (currentTarget nulls out after)
+  await persist({ watchEnabled: checked });
   await chrome.runtime.sendMessage({ type: "reschedule-watch" });
-  if (e.currentTarget.checked) {
+  if (checked) {
     await chrome.runtime.sendMessage({ type: "watch-now" });
     setTimeout(load, 1000);
   }
