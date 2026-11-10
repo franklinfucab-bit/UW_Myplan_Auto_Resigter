@@ -611,33 +611,229 @@
     return "unknown";
   }
 
+  // ----- Cart problem detection / pruning ------------------------------
+  //
+  // If ONE section in the cart is closed / unavailable / needs an add code, the
+  // site flags that row (and blocks or partially blocks the submit). Rather than
+  // letting the whole run fail, we read which rows are flagged, remove ONLY
+  // those, and resubmit the rest.
+
+  const PROBLEM_NODE_SEL =
+    '.alert-danger, .text-danger, .invalid-feedback, .is-invalid, [role="alert"]';
+  const PROBLEM_RE =
+    /\b(closed|full|unavailable|not available|no longer|cannot|can't|unable|not offered|cancell?ed|restricted|not eligible|prerequisite|time conflict|invalid|required)\b/i;
+
+  const cartRoot = () => document.getElementById("reg-cart") || document;
+
+  function slnOfRow(tr) {
+    if (!tr) return "";
+    const d = tr.querySelector("[data-sln]");
+    if (d && d.dataset.sln) return String(d.dataset.sln).trim();
+    const m = (tr.innerText || "").match(/\b\d{5}\b/);
+    return m ? m[0] : "";
+  }
+
+  // [{ tr, sln }] for every row currently in the registration cart.
+  function cartRows() {
+    return Array.from(cartRoot().querySelectorAll("tr"))
+      .filter((tr) => tr.querySelector('button[aria-label^="Remove"]'))
+      .map((tr) => ({ tr, sln: slnOfRow(tr) }))
+      .filter((r) => r.sln);
+  }
+
+  // Map<sln, reason> of cart rows the page has flagged as a problem.
+  function findCartProblems() {
+    const rows = cartRows();
+    const inCart = new Set(rows.map((r) => r.sln));
+    const bad = new Map();
+    const flag = (sln, why) => {
+      if (sln && inCart.has(sln) && !bad.has(sln)) bad.set(sln, why.slice(0, 160));
+    };
+
+    // 1) Error-styled nodes inside the cart; attribute to their row (or the row
+    //    above, in case the message is rendered as a sibling <tr>).
+    for (const n of cartRoot().querySelectorAll(PROBLEM_NODE_SEL)) {
+      const txt = (n.innerText || n.textContent || "").replace(/\s+/g, " ").trim();
+      if (!txt || txt.length < 4 || !visible(n)) continue;
+      let tr = n.closest("tr");
+      let sln = slnOfRow(tr && tr.querySelector('button[aria-label^="Remove"]') ? tr : null);
+      while (!sln && tr) {
+        tr = tr.previousElementSibling;
+        sln = slnOfRow(tr && tr.querySelector('button[aria-label^="Remove"]') ? tr : null);
+      }
+      if (sln) flag(sln, txt);
+      else for (const s of txt.match(/\b\d{5}\b/g) || []) flag(s, txt);
+    }
+
+    // 2) Page-level danger alerts that name a cart SLN.
+    for (const n of document.querySelectorAll('.alert-danger, [role="alert"]')) {
+      if (!visible(n)) continue;
+      const txt = (n.innerText || "").replace(/\s+/g, " ").trim();
+      if (!PROBLEM_RE.test(txt)) continue;
+      for (const s of txt.match(/\b\d{5}\b/g) || []) flag(s, txt);
+    }
+
+    // 3) A cart row that needs an entry/add code we don't have.
+    for (const { tr, sln } of rows) {
+      const code = tr.querySelector('input[data-field="Entry Code"]');
+      if (code && visible(code) && !String(code.value || "").trim()) {
+        flag(sln, "needs an entry/add code");
+      }
+    }
+    return bad;
+  }
+
+  // Uncheck the Drop box of `sln` (undo markDrop).
+  function unmarkDrop(sln) {
+    const cb = findDropCheckbox(sln);
+    if (cb && cb.checked) {
+      try {
+        cb.click();
+      } catch (_) {}
+    }
+  }
+
+  // Click the cart row's Remove button for `sln` and wait for the row to go.
+  async function removeFromCart(sln) {
+    const row = cartRows().find((r) => r.sln === sln);
+    const btn = row && row.tr.querySelector('button[aria-label^="Remove"]');
+    if (!btn) return false;
+    btn.click();
+    return waitUntil(() => !cartRows().some((r) => r.sln === sln), 3000, 150);
+  }
+
+  // Remove every flagged row. Un-stages any swap-drop tied to a removed want.
+  async function pruneProblems(problems, replacements) {
+    const removed = [];
+    for (const [sln, why] of problems) {
+      const ok = await removeFromCart(sln);
+      await logStep("removed unavailable class", `${sln}: ${why} -> ${ok ? "removed" : "FAILED to remove"}`);
+      if (ok) {
+        removed.push(sln);
+        for (const r of replacements || []) {
+          if (String(r.wantSln).trim() === sln) unmarkDrop(r.dropSln);
+        }
+      }
+    }
+    return removed;
+  }
+
+  const updateEnabled = () => {
+    const b = findUpdateButton();
+    return !!b && !b.disabled && b.getAttribute("aria-disabled") !== "true";
+  };
+
+  // After Update Schedule: wait for a success message, a flagged row, an empty
+  // cart, or the timeout.
+  async function waitForOutcome() {
+    await waitUntil(
+      () =>
+        detectResult() === "success" ||
+        findCartProblems().size > 0 ||
+        cartRows().length === 0,
+      UW.RESULT_WAIT_MAX_MS,
+      250
+    );
+    await sleep(600);
+  }
+
+  // Submit the cart; if some classes come back flagged, remove just those and
+  // resubmit the rest (up to PRUNE_MAX_ROUNDS times).
+  async function submitWithPruning(winners, replacements) {
+    for (let round = 1; round <= UW.PRUNE_MAX_ROUNDS; round++) {
+      const pre = findCartProblems();
+      if (pre.size) await pruneProblems(pre, replacements);
+      if (cartRows().length === 0) {
+        await logStep("stopped", "cart is empty (nothing left to submit)");
+        return;
+      }
+      if (round === 1) await markReplacementDrops(winners, replacements);
+
+      const open = await waitUntil(updateEnabled, UW.UPDATE_ENABLE_MAX_MS, 250);
+      await logStep("update button enabled?", open);
+      await sleep(
+        round === 1 ? jitter(UW.SUBMIT_DELAY_MIN_MS, UW.SUBMIT_DELAY_MAX_MS) : jitter(400, 900)
+      );
+      await patchSession({ attempts: 1, lastAttemptAt: Date.now() });
+      const clicked = await clickUpdateSchedule();
+      await logStep(`round ${round}: clicked Update Schedule`, clicked);
+      if (!clicked) {
+        await clearSession();
+        return;
+      }
+      await waitForOutcome();
+
+      const result = detectResult();
+      const left = findCartProblems();
+      await logStep(
+        `round ${round} result`,
+        `${result}; flagged in cart: ${left.size ? Array.from(left.keys()).join(", ") : "none"}`
+      );
+      if (!left.size) return; // success, or nothing flagged to act on
+      // else: loop -> prune the flagged rows and resubmit the rest.
+    }
+    await logStep("stopped", "hit max prune/resubmit rounds");
+  }
+
+  // ----- Page readiness (with reload retry) -----------------------------
+
+  // Reload the register page and let the content script start over, as long as
+  // the submit-session is still fresh. Returns true if a reload was triggered.
+  async function reloadForRetry(reason) {
+    const { submitSession: s } = await chrome.storage.local.get(UW.KEYS.SUBMIT_SESSION);
+    const n = (s && s.reloads) || 0;
+    if (!isSessionFresh(s) || n >= UW.PAGE_RELOAD_MAX) {
+      await logStep("gave up", `${reason}; reloads used ${n}/${UW.PAGE_RELOAD_MAX} or session expired`);
+      return false;
+    }
+    await patchSession({ reloads: n + 1 });
+    await logStep("reloading page", `${reason} (reload ${n + 1}/${UW.PAGE_RELOAD_MAX})`);
+    await sleep(jitter(1000, 2000));
+    location.reload();
+    return true;
+  }
+
+  // Wait for the app to mount, switch to the target quarter, then wait for
+  // `readyCond`. Returns "ok" | "logout" | "retry".
+  async function prepareTerm(data, readyCond, label) {
+    const mounted = await waitUntil(
+      () => findQuarterSelect() || readyCond(),
+      UW.PAGE_READY_MAX_MS,
+      250
+    );
+    await logStep(`page mounted (${label})?`, mounted);
+    if (!mounted) return looksLoggedOut() ? "logout" : "retry";
+    await sleep(UW.PAGE_SETTLE_MS);
+
+    const qStatus = await ensureQuarter(data[UW.KEYS.TARGET_QUARTER]);
+    await logStep("quarter", qStatus);
+    if (/^option .* not found|didn't change/.test(qStatus)) return "retry";
+
+    const ready = await waitUntil(readyCond, UW.PAGE_READY_MAX_MS, 250);
+    await logStep(`page ready (${label})?`, ready);
+    if (!ready) return looksLoggedOut() ? "logout" : "retry";
+    await sleep(300);
+    return "ok";
+  }
+
   // ----- Auto-submit state machine -------------------------------------
 
   // "prefill" method: type the conflict-resolved SLNs into the Enter SLN box,
   // Add to cart, then (if auto) Update Schedule.
   async function runPrefillAttempt(data, doSubmit, slnsOverride) {
-    // Wait for the React app to finish mounting after the reload. Acting too
-    // early was why test-fire filled nothing and the cart stayed empty.
-    const ready = await waitUntil(
+    const st = await prepareTerm(
+      data,
       () => findSlnInput() && findAddToCartButton() && findUpdateButton(),
-      UW.PAGE_READY_MAX_MS,
-      250
+      "prefill"
     );
-    await logStep("page ready?", ready);
-    if (!ready && looksLoggedOut()) {
-      await logStep(
-        "aborted",
-        "appears logged out (redirected to weblogin) - signing you in, will retry"
-      );
+    if (st === "logout") {
+      await logStep("aborted", "appears logged out (redirected to weblogin) - signing you in, will retry");
       return; // leave session fresh so the post-login reload retries.
     }
-    await sleep(UW.PAGE_SETTLE_MS);
-
-    const qStatus = await ensureQuarter(data[UW.KEYS.TARGET_QUARTER]);
-    await logStep("quarter", qStatus);
-    if (qStatus.startsWith("switched")) {
-      // Term switch re-renders the page; wait for the SLN box to come back.
-      await waitUntil(() => findSlnInput(), UW.PAGE_READY_MAX_MS, 250);
+    if (st === "retry") {
+      if (await reloadForRetry("page not ready")) return;
+      if (doSubmit) await clearSession();
+      return;
     }
 
     const winners =
@@ -666,60 +862,50 @@
       return;
     }
 
-    // Swap support: only NOW that the wanted SLN is staged in the cart, check the
-    // Drop box of its configured replacement so the submit does add+drop together
-    // (frees credit space). Done after cart-confirm so we never drop for nothing.
-    await markReplacementDrops(winners, data[UW.KEYS.REPLACEMENTS] || []);
-
-    await sleep(jitter(UW.SUBMIT_DELAY_MIN_MS, UW.SUBMIT_DELAY_MAX_MS));
-    await patchSession({ attempts: 1, lastAttemptAt: Date.now() });
-    const clicked = await clickUpdateSchedule();
-    await logStep("clicked Update Schedule", clicked);
-    if (!clicked) {
-      await clearSession();
-      return;
-    }
+    // Swap drops are staged inside submitWithPruning (only after the cart is
+    // confirmed), then it submits and prunes/resubmits on flagged classes.
+    await submitWithPruning(winners, data[UW.KEYS.REPLACEMENTS] || []);
     // Safety net for swaps: if we dropped a class but the wanted SLN didn't end
     // up registered, add the dropped class right back.
     await maybeRecoverDrops(winners, data[UW.KEYS.REPLACEMENTS] || []);
   }
 
   // "import" method: click the page's own "Import from MyPlan" button so the
-  // cart is populated from the saved plan, then (if auto) Update Schedule. We
-  // do NOT type SLNs here - that's the prefill path.
+  // cart is populated from the saved plan, then (if auto) Update Schedule. If
+  // MyPlan imports nothing but SLNs are configured, falls back to typing them.
   async function runImportAttempt(data, doSubmit) {
-    const ready = await waitUntil(
+    const st = await prepareTerm(
+      data,
       () => findImportButton() && findUpdateButton(),
-      UW.PAGE_READY_MAX_MS,
-      250
+      "import"
     );
-    await logStep("page ready (import)?", ready);
-    if (!ready && looksLoggedOut()) {
-      await logStep(
-        "aborted",
-        "appears logged out (redirected to weblogin) - signing you in, will retry"
-      );
+    if (st === "logout") {
+      await logStep("aborted", "appears logged out (redirected to weblogin) - signing you in, will retry");
       return; // leave session fresh so the post-login reload retries.
     }
-    await sleep(UW.PAGE_SETTLE_MS);
-
-    const qStatus = await ensureQuarter(data[UW.KEYS.TARGET_QUARTER]);
-    await logStep("quarter", qStatus);
-    if (qStatus.startsWith("switched")) {
-      // Term switch re-renders the page; wait for the Import button to come back.
-      await waitUntil(() => findImportButton(), UW.PAGE_READY_MAX_MS, 250);
-    }
-
-    const importBtn = findImportButton();
-    if (!importBtn) {
-      await logStep("aborted", "Import from MyPlan button not found");
-      highlightButtons();
+    if (st === "retry") {
+      if (await reloadForRetry("page/Import button not ready")) return;
+      // Out of reloads: last resort, type the configured SLNs if any.
+      const winners = resolveWinners(data, {});
+      if (doSubmit && winners.length && findSlnInput() && findUpdateButton()) {
+        await logStep("fallback", "Import button never appeared; using SLN prefill");
+        if (await ensureInCart(winners)) {
+          await submitWithPruning(winners, data[UW.KEYS.REPLACEMENTS] || []);
+          return;
+        }
+      }
       if (doSubmit) await clearSession();
       return;
     }
-    importBtn.click();
+
+    findImportButton().click();
     await logStep("clicked Import from MyPlan", true);
     await waitForCart();
+    const note = Array.from(document.querySelectorAll(".alert-info, .alert-danger"))
+      .map((a) => (a.innerText || "").replace(/\s+/g, " ").trim())
+      .filter(Boolean)
+      .join(" | ");
+    if (note) await logStep("import message", note);
     await logStep("cart filled?", !cartIsEmpty());
     highlightButtons();
 
@@ -728,11 +914,19 @@
       return;
     }
 
-    await sleep(jitter(UW.SUBMIT_DELAY_MIN_MS, UW.SUBMIT_DELAY_MAX_MS));
-    await patchSession({ attempts: 1, lastAttemptAt: Date.now() });
-    const clicked = await clickUpdateSchedule();
-    await logStep("clicked Update Schedule", clicked);
-    if (!clicked) await clearSession();
+    if (cartIsEmpty()) {
+      const winners = resolveWinners(data, {});
+      if (winners.length && (await ensureInCart(winners))) {
+        await logStep("fallback", "MyPlan imported nothing; added configured SLNs");
+        await submitWithPruning(winners, data[UW.KEYS.REPLACEMENTS] || []);
+      } else {
+        await logStep("aborted", "nothing in cart after import");
+        await clearSession();
+      }
+      return;
+    }
+
+    await submitWithPruning([], []);
   }
 
   let ran = false;

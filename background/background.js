@@ -142,15 +142,16 @@ async function handleRegisterAlarm(opts = {}) {
     url: ["https://register.uw.edu/*", "https://sdb.admin.uw.edu/*"]
   });
   if (tabs.length) {
-    for (const t of tabs) {
-      try {
-        await chrome.tabs.reload(t.id, { bypassCache: true });
-      } catch (e) {
-        console.warn("[uw-autoreg] reload failed for tab", t.id, e);
-      }
+    // Reload ONE tab only. Reloading several would run several submitters in
+    // parallel (log showed 3 simultaneous runs at 6 AM).
+    const t = tabs.find((x) => x.url && x.url.startsWith(UW.REGISTER_URL)) || tabs[0];
+    try {
+      await chrome.tabs.reload(t.id, { bypassCache: true });
+    } catch (e) {
+      console.warn("[uw-autoreg] reload failed for tab", t.id, e);
     }
     try {
-      await chrome.tabs.update(tabs[0].id, { active: true });
+      await chrome.tabs.update(t.id, { active: true });
     } catch (_) {}
   } else {
     try {
