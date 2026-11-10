@@ -671,6 +671,16 @@
       const txt = (n.innerText || "").replace(/\s+/g, " ").trim();
       if (!PROBLEM_RE.test(txt)) continue;
       for (const s of txt.match(/\b\d{5}\b/g) || []) flag(s, txt);
+      // The site names the failing section by course label, e.g.
+      // "E E 347 A: You cannot register for this course ...".
+      for (const { tr, sln } of rows) {
+        const label = (tr.innerText || "")
+          .replace(/\s+/g, " ")
+          .replace(sln, "")
+          .replace(/\s+\d+(\.\d+)?\s*$/, "")
+          .trim();
+        if (label.length >= 5 && txt.includes(label + ":")) flag(sln, txt);
+      }
     }
 
     // 3) A cart row that needs an entry/add code we don't have.
